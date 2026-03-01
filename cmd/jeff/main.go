@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 const (
@@ -92,10 +90,8 @@ Flags for run:
   --fallback-model     Fallback model on overload (529)
 
 Interactive commands (during session):
-  /quit, /exit     End the session
-  /history         Show conversation history
-  /session         Show session info
-  /clear           Clear screen`)
+  /help          Show available commands
+  /quit, /exit   End the session`)
 }
 
 func galactaURL() string {
@@ -220,7 +216,26 @@ func cmdRun(args []string) {
 		printSessionHistory(flags.base, session)
 	}
 
-	fmt.Fprintf(os.Stderr, "%sSession: %s%s\n", colorDim, session, colorReset)
+	// Fetch session info for banner
+	model := flags.model
+	mode := flags.mode
+	if model == "" || mode == "" {
+		if resp, err := getJSON(flags.base + "/sessions/" + session); err == nil {
+			if data, ok := resp["data"].(map[string]any); ok {
+				if model == "" {
+					model, _ = data["model"].(string)
+				}
+				if mode == "" {
+					mode, _ = data["permission_mode"].(string)
+				}
+			}
+		}
+	}
+	if mode == "" {
+		mode = "default"
+	}
+
+	printBanner(model, flags.dir, session, mode)
 
 	// If a message was given on the command line, send it
 	if flags.message != "" {
@@ -278,7 +293,6 @@ func findMostRecentSession(base string) string {
 		return ""
 	}
 
-	// Find session with most recent updated_at
 	var bestID string
 	var bestTime string
 	for _, s := range data {
@@ -294,368 +308,6 @@ func findMostRecentSession(base string) string {
 		}
 	}
 	return bestID
-}
-
-func interactiveLoop(base, session, outputFormat string) {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Fprintf(os.Stderr, "\n%s> %s", colorBold, colorReset)
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			// EOF (ctrl-d)
-			fmt.Fprintln(os.Stderr)
-			return
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Handle slash commands
-		switch {
-		case line == "/quit" || line == "/exit":
-			return
-		case line == "/history":
-			printSessionHistory(base, session)
-			continue
-		case line == "/session":
-			printSessionInfo(base, session)
-			continue
-		case line == "/clear":
-			fmt.Print("\033[2J\033[H")
-			continue
-		case line == "/cost" || line == "/usage":
-			printUsageInfo(base, session)
-			continue
-		case line == "/tasks":
-			printTasks(base, session)
-			continue
-		case line == "/permissions" || strings.HasPrefix(line, "/permissions "):
-			handlePermissions(base, session, line)
-			continue
-		case line == "/model" || strings.HasPrefix(line, "/model "):
-			handleModel(base, session, line)
-			continue
-		case line == "/plan":
-			fmt.Fprintf(os.Stderr, "%sSend a message asking to enter plan mode, or use the galacta_enter_plan_mode tool.%s\n", colorDim, colorReset)
-			continue
-		case line == "/compact" || strings.HasPrefix(line, "/compact "):
-			handleCompact(base, session, line)
-			continue
-		case line == "/help":
-			printHelp()
-			continue
-		case strings.HasPrefix(line, "/"):
-			fmt.Fprintf(os.Stderr, "%sunknown command: %s%s\n", colorDim, line, colorReset)
-			continue
-		}
-
-		streamMessage(base, session, line, outputFormat)
-	}
-}
-
-func streamMessage(base, session, message, outputFormat string) {
-	reqBody, _ := json.Marshal(map[string]string{"message": message})
-	req, err := http.NewRequest("POST", base+"/sessions/"+session+"/message", bytes.NewReader(reqBody))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-
-	client := &http.Client{Timeout: 30 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror connecting to Galacta: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "%serror: HTTP %d: %s%s\n", colorRed, resp.StatusCode, string(body), colorReset)
-		return
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			switch outputFormat {
-			case "json":
-				fmt.Println(data)
-			case "text":
-				handleSSEEventText(data)
-			default:
-				handleSSEEvent(data, base, session)
-			}
-		}
-	}
-	if outputFormat != "json" {
-		fmt.Println()
-	}
-}
-
-// handleSSEEventText handles SSE events in "text" output mode — only prints text content.
-func handleSSEEventText(data string) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
-	}
-	eventType, _ := event["type"].(string)
-	if eventType == "text_delta" {
-		text, _ := event["text"].(string)
-		fmt.Print(text)
-	}
-}
-
-func handleSSEEvent(data string, base string, session string) {
-	var event map[string]any
-	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
-	}
-
-	eventType, _ := event["type"].(string)
-
-	switch eventType {
-	case "text_delta":
-		text, _ := event["text"].(string)
-		fmt.Print(text)
-
-	case "thinking_delta":
-		text, _ := event["text"].(string)
-		fmt.Fprintf(os.Stderr, "%s%s%s", colorDim, text, colorReset)
-
-	case "tool_start":
-		tool, _ := event["tool"].(string)
-		input, _ := json.Marshal(event["input"])
-		fmt.Fprintf(os.Stderr, "\n%s[%s]%s %s\n", colorCyan, tool, colorReset, string(input))
-
-	case "tool_result":
-		tool, _ := event["tool"].(string)
-		output, _ := event["output"].(string)
-		isError, _ := event["is_error"].(bool)
-		dur, _ := event["duration_ms"].(float64)
-		if isError {
-			fmt.Fprintf(os.Stderr, "%s[%s error] %s%s\n", colorRed, tool, output, colorReset)
-		} else {
-			lines := strings.Split(output, "\n")
-			maxLines := 20
-			if len(lines) > maxLines {
-				for _, l := range lines[:maxLines] {
-					fmt.Fprintf(os.Stderr, "  %s\n", l)
-				}
-				fmt.Fprintf(os.Stderr, "%s  ... (%d more lines)%s\n", colorDim, len(lines)-maxLines, colorReset)
-			} else {
-				for _, l := range lines {
-					fmt.Fprintf(os.Stderr, "  %s\n", l)
-				}
-			}
-			fmt.Fprintf(os.Stderr, "%s  (%dms)%s\n", colorDim, int(dur), colorReset)
-		}
-
-	case "permission_request":
-		requestID, _ := event["request_id"].(string)
-		tool, _ := event["tool"].(string)
-		input, _ := json.Marshal(event["input"])
-		fmt.Fprintf(os.Stderr, "\n%s[permission] %s%s %s\n", colorYellow, tool, colorReset, string(input))
-		fmt.Fprintf(os.Stderr, "Allow? (y/n): ")
-
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		approved := answer == "y" || answer == "yes"
-
-		postJSON(base+"/sessions/"+session+"/permission/"+requestID, map[string]bool{"approved": approved})
-
-	case "usage":
-		inputTok, _ := event["input_tokens"].(float64)
-		outputTok, _ := event["output_tokens"].(float64)
-		fmt.Fprintf(os.Stderr, "%s[tokens: %d in, %d out]%s\n", colorDim, int(inputTok), int(outputTok), colorReset)
-
-	case "turn_complete":
-		reason, _ := event["stop_reason"].(string)
-		fmt.Fprintf(os.Stderr, "%s[done: %s]%s\n", colorDim, reason, colorReset)
-
-	case "subagent_start":
-		agentType, _ := event["agent_type"].(string)
-		description, _ := event["description"].(string)
-		if description != "" {
-			fmt.Fprintf(os.Stderr, "\n%s[agent: %s] %s%s\n", colorCyan, agentType, description, colorReset)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n%s[agent: %s]%s\n", colorCyan, agentType, colorReset)
-		}
-
-	case "subagent_end":
-		agentType, _ := event["agent_type"].(string)
-		fmt.Fprintf(os.Stderr, "%s[agent: %s done]%s\n", colorDim, agentType, colorReset)
-
-	case "question_request":
-		requestID, _ := event["request_id"].(string)
-		question, _ := event["question"].(string)
-		header, _ := event["header"].(string)
-
-		if header != "" {
-			fmt.Fprintf(os.Stderr, "\n%s[%s]%s %s\n", colorYellow, header, colorReset, question)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n%s[question]%s %s\n", colorYellow, colorReset, question)
-		}
-
-		// Display options if provided
-		if opts, ok := event["options"].([]any); ok && len(opts) > 0 {
-			for i, opt := range opts {
-				if o, ok := opt.(map[string]any); ok {
-					label, _ := o["label"].(string)
-					desc, _ := o["description"].(string)
-					if desc != "" {
-						fmt.Fprintf(os.Stderr, "  %d) %s — %s\n", i+1, label, desc)
-					} else {
-						fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, label)
-					}
-				}
-			}
-		}
-
-		fmt.Fprintf(os.Stderr, "Answer: ")
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(answer)
-
-		// If user typed a number and we have options, resolve to the label
-		if opts, ok := event["options"].([]any); ok && len(opts) > 0 {
-			var idx int
-			if _, err := fmt.Sscanf(answer, "%d", &idx); err == nil && idx >= 1 && idx <= len(opts) {
-				if o, ok := opts[idx-1].(map[string]any); ok {
-					if label, ok := o["label"].(string); ok {
-						answer = label
-					}
-				}
-			}
-		}
-
-		postJSON(base+"/sessions/"+session+"/question/"+requestID, map[string]string{"answer": answer})
-
-	case "plan_mode_changed":
-		active, _ := event["active"].(bool)
-		if active {
-			fmt.Fprintf(os.Stderr, "%s[plan mode: on]%s\n", colorYellow, colorReset)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s[plan mode: off]%s\n", colorYellow, colorReset)
-		}
-
-	case "team_created":
-		teamName, _ := event["team_name"].(string)
-		fmt.Fprintf(os.Stderr, "%s[team: %s created]%s\n", colorCyan, teamName, colorReset)
-
-	case "team_deleted":
-		teamName, _ := event["team_name"].(string)
-		fmt.Fprintf(os.Stderr, "%s[team: %s deleted]%s\n", colorDim, teamName, colorReset)
-
-	case "team_message":
-		from, _ := event["from"].(string)
-		recipient, _ := event["recipient"].(string)
-		summary, _ := event["summary"].(string)
-		if recipient != "" {
-			fmt.Fprintf(os.Stderr, "%s[%s → %s] %s%s\n", colorCyan, from, recipient, summary, colorReset)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s[%s → all] %s%s\n", colorCyan, from, summary, colorReset)
-		}
-
-	case "error":
-		msg, _ := event["message"].(string)
-		fmt.Fprintf(os.Stderr, "%s[error] %s%s\n", colorRed, msg, colorReset)
-	}
-}
-
-func printSessionHistory(base, session string) {
-	resp, err := getJSON(base + "/sessions/" + session + "/messages")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror loading history: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	data, ok := resp["data"].(map[string]any)
-	if !ok {
-		return
-	}
-	messages, ok := data["messages"].([]any)
-	if !ok || len(messages) == 0 {
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "%s--- conversation history (%d messages) ---%s\n", colorDim, len(messages), colorReset)
-
-	for _, m := range messages {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			continue
-		}
-		role, _ := msg["Role"].(string)
-		contentStr, _ := msg["Content"].(string)
-
-		var content []map[string]any
-		if err := json.Unmarshal([]byte(contentStr), &content); err != nil {
-			continue
-		}
-
-		switch role {
-		case "user":
-			for _, block := range content {
-				blockType, _ := block["type"].(string)
-				if blockType == "text" {
-					text, _ := block["text"].(string)
-					fmt.Fprintf(os.Stderr, "%s> %s%s\n", colorBold, text, colorReset)
-				} else if blockType == "tool_result" {
-					toolID, _ := block["tool_use_id"].(string)
-					text, _ := block["content"].(string)
-					isErr, _ := block["is_error"].(bool)
-					if isErr {
-						fmt.Fprintf(os.Stderr, "%s  [result %s] error: %s%s\n", colorDim, shortID(toolID), truncate(text, 100), colorReset)
-					} else {
-						fmt.Fprintf(os.Stderr, "%s  [result %s] %s%s\n", colorDim, shortID(toolID), truncate(text, 100), colorReset)
-					}
-				}
-			}
-		case "assistant":
-			for _, block := range content {
-				blockType, _ := block["type"].(string)
-				if blockType == "text" {
-					text, _ := block["text"].(string)
-					fmt.Fprintf(os.Stderr, "%s\n", text)
-				} else if blockType == "tool_use" {
-					name, _ := block["name"].(string)
-					fmt.Fprintf(os.Stderr, "%s[%s]%s\n", colorCyan, name, colorReset)
-				}
-			}
-		}
-	}
-	fmt.Fprintf(os.Stderr, "%s--- end history ---%s\n\n", colorDim, colorReset)
-}
-
-func printSessionInfo(base, session string) {
-	resp, err := getJSON(base + "/sessions/" + session)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	data, ok := resp["data"].(map[string]any)
-	if !ok {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "  ID:     %s\n", data["id"])
-	fmt.Fprintf(os.Stderr, "  Model:  %s\n", data["model"])
-	fmt.Fprintf(os.Stderr, "  Dir:    %s\n", data["working_dir"])
-	fmt.Fprintf(os.Stderr, "  Mode:   %s\n", data["permission_mode"])
-	fmt.Fprintf(os.Stderr, "  Status: %s\n", data["status"])
-	if usage, ok := data["usage"].(map[string]any); ok {
-		in, _ := usage["TotalInputTokens"].(float64)
-		out, _ := usage["TotalOutputTokens"].(float64)
-		msgs, _ := usage["MessageCount"].(float64)
-		fmt.Fprintf(os.Stderr, "  Tokens: %d in, %d out (%d messages)\n", int(in), int(out), int(msgs))
-	}
 }
 
 func cmdSessionCreate(args []string) {
@@ -791,6 +443,8 @@ func cmdHealth() {
 	fmt.Println(string(out))
 }
 
+// HTTP helpers
+
 func postJSON(url string, body any) (map[string]any, error) {
 	data, _ := json.Marshal(body)
 	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
@@ -821,192 +475,6 @@ func getJSON(url string) (map[string]any, error) {
 	return result, nil
 }
 
-func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
-	os.Exit(1)
-}
-
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
-
-func printUsageInfo(base, session string) {
-	resp, err := getJSON(base + "/sessions/" + session)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	data, ok := resp["data"].(map[string]any)
-	if !ok {
-		return
-	}
-	model, _ := data["model"].(string)
-	fmt.Fprintf(os.Stderr, "  Model: %s\n", model)
-	if usage, ok := data["usage"].(map[string]any); ok {
-		inTok, _ := usage["TotalInputTokens"].(float64)
-		outTok, _ := usage["TotalOutputTokens"].(float64)
-		cacheRead, _ := usage["TotalCacheReadTokens"].(float64)
-		cacheWrite, _ := usage["TotalCacheWriteTokens"].(float64)
-		msgs, _ := usage["MessageCount"].(float64)
-		fmt.Fprintf(os.Stderr, "  Input tokens:       %d\n", int(inTok))
-		fmt.Fprintf(os.Stderr, "  Output tokens:      %d\n", int(outTok))
-		fmt.Fprintf(os.Stderr, "  Cache read tokens:  %d\n", int(cacheRead))
-		fmt.Fprintf(os.Stderr, "  Cache write tokens: %d\n", int(cacheWrite))
-		fmt.Fprintf(os.Stderr, "  Messages:           %d\n", int(msgs))
-
-		// Estimate cost using known pricing
-		var costUSD float64
-		switch {
-		case strings.Contains(model, "opus"):
-			costUSD = (inTok/1_000_000)*15.0 + (outTok/1_000_000)*75.0
-		case strings.Contains(model, "sonnet"):
-			costUSD = (inTok/1_000_000)*3.0 + (outTok/1_000_000)*15.0
-		case strings.Contains(model, "haiku"):
-			costUSD = (inTok/1_000_000)*0.80 + (outTok/1_000_000)*4.0
-		}
-		if costUSD > 0 {
-			fmt.Fprintf(os.Stderr, "  Estimated cost:     $%.4f\n", costUSD)
-		}
-	}
-}
-
-func printTasks(base, session string) {
-	resp, err := getJSON(base + "/sessions/" + session + "/tasks")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	data, ok := resp["data"].([]any)
-	if !ok || len(data) == 0 {
-		fmt.Fprintf(os.Stderr, "%sNo tasks.%s\n", colorDim, colorReset)
-		return
-	}
-	for _, item := range data {
-		t, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := t["id"].(float64)
-		subject, _ := t["subject"].(string)
-		status, _ := t["status"].(string)
-		owner, _ := t["owner"].(string)
-
-		statusColor := colorDim
-		switch status {
-		case "in_progress":
-			statusColor = colorYellow
-		case "completed":
-			statusColor = colorGreen
-		}
-		ownerStr := ""
-		if owner != "" {
-			ownerStr = fmt.Sprintf(" (%s)", owner)
-		}
-		fmt.Fprintf(os.Stderr, "  %d. %s%-11s%s %s%s\n", int(id), statusColor, status, colorReset, subject, ownerStr)
-	}
-}
-
-func handlePermissions(base, session, line string) {
-	parts := strings.Fields(line)
-	if len(parts) == 1 {
-		// Show current
-		resp, err := getJSON(base + "/sessions/" + session)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-			return
-		}
-		data, ok := resp["data"].(map[string]any)
-		if !ok {
-			return
-		}
-		mode, _ := data["permission_mode"].(string)
-		fmt.Fprintf(os.Stderr, "  Permission mode: %s\n", mode)
-		fmt.Fprintf(os.Stderr, "%s  Available: default, acceptEdits, bypassPermissions, plan, dontAsk%s\n", colorDim, colorReset)
-		return
-	}
-	// Set new mode
-	newMode := parts[1]
-	_, err := patchJSON(base+"/sessions/"+session, map[string]string{"permission_mode": newMode})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "  Permission mode set to: %s\n", newMode)
-}
-
-func handleModel(base, session, line string) {
-	parts := strings.Fields(line)
-	if len(parts) == 1 {
-		// Show current
-		resp, err := getJSON(base + "/sessions/" + session)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-			return
-		}
-		data, ok := resp["data"].(map[string]any)
-		if !ok {
-			return
-		}
-		model, _ := data["model"].(string)
-		fmt.Fprintf(os.Stderr, "  Model: %s\n", model)
-		return
-	}
-	// Set new model
-	newModel := parts[1]
-	_, err := patchJSON(base+"/sessions/"+session, map[string]string{"model": newModel})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "  Model set to: %s\n", newModel)
-}
-
-func handleCompact(base, session, line string) {
-	keep := 10
-	parts := strings.Fields(line)
-	if len(parts) > 1 {
-		fmt.Sscanf(parts[1], "%d", &keep)
-	}
-
-	body := map[string]int{"keep_messages": keep}
-	resp, err := postJSON(base+"/sessions/"+session+"/compact", body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	data, ok := resp["data"].(map[string]any)
-	if !ok {
-		return
-	}
-	compacted, _ := data["compacted"].(bool)
-	remaining, _ := data["message_count"].(float64)
-	removed, _ := data["removed_messages"].(float64)
-	if compacted {
-		fmt.Fprintf(os.Stderr, "  Compacted: removed %d messages, %d remaining\n", int(removed), int(remaining))
-	} else {
-		fmt.Fprintf(os.Stderr, "  Nothing to compact (%d messages)\n", int(remaining))
-	}
-}
-
-func printHelp() {
-	fmt.Fprintf(os.Stderr, `%sAvailable commands:%s
-  /help          Show this help
-  /quit, /exit   End the session
-  /history       Show conversation history
-  /session       Show session info
-  /cost, /usage  Show token usage and cost
-  /model [name]  Show or change model
-  /permissions [mode]  Show or change permission mode
-  /tasks         List tasks
-  /plan          Plan mode info
-  /compact [N]   Compact conversation (keep last N messages, default 10)
-  /clear         Clear screen
-`, colorBold, colorReset)
-}
-
 func patchJSON(url string, body any) (map[string]any, error) {
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequest("PATCH", url, bytes.NewReader(data))
@@ -1029,6 +497,20 @@ func patchJSON(url string, body any) (map[string]any, error) {
 		return result, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errMsg)
 	}
 	return result, nil
+}
+
+// Utilities
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func truncate(s string, max int) string {

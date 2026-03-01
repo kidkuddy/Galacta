@@ -52,6 +52,21 @@ func (r *Registry) List() []string {
 	return names
 }
 
+// SkillInfo holds exported skill metadata for API responses.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// ListInfo returns name and description for all registered skills.
+func (r *Registry) ListInfo() []SkillInfo {
+	infos := make([]SkillInfo, 0, len(r.skills))
+	for _, s := range r.skills {
+		infos = append(infos, SkillInfo{Name: s.Name, Description: s.Description})
+	}
+	return infos
+}
+
 // loadPluginSkills scans {pluginsDir}/*/skills/*.md for skill files
 // installed by plugins.
 func (r *Registry) loadPluginSkills(pluginsDir string) {

@@ -777,6 +777,17 @@ func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ListSkills returns available skills for a given working directory.
+func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
+	workingDir := r.URL.Query().Get("working_dir")
+	if workingDir == "" {
+		writeError(w, http.StatusBadRequest, "working_dir query parameter is required")
+		return
+	}
+	registry := skill.NewRegistry(workingDir)
+	writeJSON(w, http.StatusOK, registry.ListInfo())
+}
+
 func isValidPermissionMode(mode string) bool {
 	switch mode {
 	case "default", "acceptEdits", "bypassPermissions", "plan", "dontAsk":
