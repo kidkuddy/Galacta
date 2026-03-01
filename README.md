@@ -12,7 +12,7 @@
 
 ## What It Is
 
-Galacta is a self-contained Go implementation of a Claude agent loop that runs as a local HTTP daemon. **Jeff** is the interactive CLI that talks to it — spinners, box-drawn UI, multiline input, and all.
+Galacta is a self-contained Go implementation of a Claude agent loop that runs as a local HTTP daemon. **Jeff** is the interactive CLI that talks to it — spinners, box-drawn UI, tab completion, multiline input, and all.
 
 No Node.js. No Bun. No V8. No subprocess. ~10–15 MB idle.
 
@@ -21,17 +21,41 @@ No Node.js. No Bun. No V8. No subprocess. ~10–15 MB idle.
 ## Quick Start
 
 ```bash
-# Start the daemon
+# Build and install
+make install
+
+# Start the daemon (requires ANTHROPIC_API_KEY)
 galacta serve
 
-# Start an interactive session
-jeff run
+# Start an interactive session (default command)
+jeff
 
 # One-shot message
-jeff run "explain this codebase"
+jeff "explain this codebase"
 
 # Resume last session
-jeff run --continue
+jeff --continue
+
+# Explicit run with flags
+jeff run --model claude-sonnet-4-20250514 --effort high
+```
+
+---
+
+## Install
+
+```bash
+# Build both binaries
+make build
+
+# Install to /usr/local/bin (may need sudo)
+make install
+
+# Or install to a custom path
+make install INSTALL_DIR=~/.local/bin
+
+# Uninstall
+make uninstall
 ```
 
 ---
@@ -61,7 +85,7 @@ jeff run --continue
 │  main.go      Entry point, flags, session CRUD, HTTP helpers│
 │  ui.go        Spinner, box drawing, banner, colors          │
 │  events.go    SSE streaming with spinner + styled output    │
-│  commands.go  Interactive loop, /slash commands, multiline  │
+│  commands.go  Readline, /slash commands, tab completion     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,7 +94,7 @@ jeff run --continue
 | Component | Responsibility |
 |-----------|---------------|
 | `AgentLoop` | The `tool_use` → execute → `tool_result` → repeat cycle |
-| `Anthropic Client` | Streaming Claude API client (SSE, content block deltas) |
+| `Anthropic Client` | Streaming Claude API client (SSE, content block deltas, rate limit capture) |
 | `ToolCaller` | Dispatches tool calls; serial and concurrent execution |
 | `PermissionGate` | Intercepts tool calls requiring user confirmation |
 | `EventEmitter` | Structured SSE events to connected clients |
@@ -81,14 +105,28 @@ jeff run --continue
 
 ## Jeff CLI
 
-Jeff is the terminal interface to Galacta. It provides:
+Jeff is the terminal interface to Galacta. Running `jeff` with no arguments starts an interactive session.
 
+```
+       ╱▔▔▔▔╲
+      ╱      ╲
+     ╱  ·  ·  ╲
+    ╱    ▽▽    ╲
+   ╱  ▔▔▔▔▔▔▔▔  ╲
+  ▕              ▏
+   ╲   ╱    ╲   ╱
+    ╲ ╱  jeff ╲╱
+```
+
+Features:
+
+- **Tab completion** — type `/` + Tab to autocomplete slash commands (readline)
 - **Spinner indicators** — animated braille spinner during thinking and tool execution
 - **Box-drawn tool output** — tool inputs, outputs, and durations in styled boxes
-- **Session banner** — model, directory, session ID, and permission mode on start
 - **Multiline input** — type `"""` to enter/exit multiline mode
 - **Styled permission prompts** — double-line box for approval requests
 - **Question UI** — numbered options in a box for interactive questions
+- **Rate limit usage** — `/usage` shows 5-hour and weekly limit utilization with progress bars
 
 ### Interactive Commands
 
@@ -102,7 +140,8 @@ Jeff is the terminal interface to Galacta. It provides:
 | `/clear` | Clear screen |
 | `/tasks` | List tasks with status icons |
 | `/skills` | List available skills |
-| `/cost` | Token usage and estimated cost |
+| `/cost` | Session token usage and estimated cost |
+| `/usage` | Rate limit utilization (5h and weekly) |
 | `/plan` | Plan mode info |
 | `/help` | Show all commands |
 | `/quit` | End session |
@@ -110,6 +149,7 @@ Jeff is the terminal interface to Galacta. It provides:
 ### CLI Flags
 
 ```
+jeff [flags] ["message"]
 jeff run [flags] ["message"]
 
   --session, -s        Resume session by UUID
@@ -161,6 +201,7 @@ jeff run [flags] ["message"]
 |------|-------------|
 | `galacta_agent` | Spawn sub-agents for parallel work |
 | `galacta_skill` | Execute named skills (built-in or user-defined) |
+| `galacta_register_skill` | Create new skill files at runtime |
 | `galacta_task_*` | Task creation, listing, and updates |
 | `galacta_team_*` | Team creation, messaging, and coordination |
 | `galacta_ask_user` | Interactive questions with options |
@@ -185,6 +226,33 @@ External MCP tools are registered at runtime as `mcp__{server}__{tool}` based on
 
 ---
 
+## Skills
+
+Skills are reusable prompt templates loaded from multiple sources:
+
+| Source | Path | Format |
+|--------|------|--------|
+| Built-in | hardcoded | `commit`, `review-pr` |
+| Global skills | `~/.claude/skills/{name}/SKILL.md` | Frontmatter + prompt |
+| Global commands | `~/.claude/commands/{name}.md` | First line = description, rest = prompt |
+| Installed plugins | `~/.claude/plugins/cache/.../skills/{name}/SKILL.md` | Frontmatter + prompt |
+| Project skills | `{cwd}/.claude/skills/{name}.md` | Frontmatter + prompt |
+| Runtime | via `galacta_register_skill` tool | Agent creates skills on the fly |
+
+Skill file format:
+
+```markdown
+---
+name: my-skill
+description: Does something useful
+---
+Your prompt template here. Use {{.Args}} for arguments.
+```
+
+List skills with `/skills` in Jeff or `GET /skills`.
+
+---
+
 ## API
 
 Galacta exposes an HTTP API on port 9090 (default).
@@ -204,6 +272,7 @@ Galacta exposes an HTTP API on port 9090 (default).
 | `POST` | `/sessions/{id}/permission/{rid}` | Respond to permission |
 | `POST` | `/sessions/{id}/question/{rid}` | Respond to question |
 | `GET` | `/skills?working_dir=...` | List available skills |
+| `GET` | `/usage` | Rate limit utilization |
 
 ### SSE Event Types
 
@@ -222,22 +291,6 @@ Galacta exposes an HTTP API on port 9090 (default).
 { "type": "team_message", "from": "...", "recipient": "...", "summary": "..." }
 { "type": "error", "message": "..." }
 ```
-
----
-
-## Skills
-
-Skills are reusable prompt templates. Define custom skills in `.claude/skills/*.md`:
-
-```markdown
----
-name: my-skill
-description: Does something useful
----
-Your prompt template here. Use {{.Args}} for arguments.
-```
-
-Built-in skills: `commit`, `review-pr`. List all with `/skills` in Jeff or `GET /skills`.
 
 ---
 
