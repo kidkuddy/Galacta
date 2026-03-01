@@ -204,9 +204,9 @@ func cmdRun(args []string) {
 	// Ensure or create session
 	session := flags.session
 
-	// Handle --continue: find the most recent session
+	// Handle --continue: find the most recent session for this working dir
 	if session == "" && flags.continueFlag {
-		session = findMostRecentSession(flags.base)
+		session = findMostRecentSession(flags.base, flags.dir)
 		if session == "" {
 			fatal("no previous sessions found to continue")
 		}
@@ -286,8 +286,12 @@ func createSession(flags runFlags) string {
 	return data["id"].(string)
 }
 
-func findMostRecentSession(base string) string {
-	resp, err := getJSON(base + "/sessions")
+func findMostRecentSession(base, workingDir string) string {
+	url := base + "/sessions"
+	if workingDir != "" {
+		url += "?working_dir=" + workingDir
+	}
+	resp, err := getJSON(url)
 	if err != nil {
 		return ""
 	}

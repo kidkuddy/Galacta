@@ -98,6 +98,68 @@ func (c *Client) parseRateLimitHeaders(h http.Header) {
 	}
 }
 
+// SendMessage sends a non-streaming MessageRequest and returns the full response.
+func (c *Client) SendMessage(ctx context.Context, req MessageRequest) (*MessageResponse, error) {
+	req.Stream = false
+	if req.MaxTokens == 0 {
+		req.MaxTokens = defaultMaxTokens
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if isOAuthToken(c.apiKey) {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		httpReq.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	} else {
+		httpReq.Header.Set("x-api-key", c.apiKey)
+	}
+	httpReq.Header.Set("anthropic-version", apiVersion)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	c.parseRateLimitHeaders(resp.Header)
+
+	if resp.StatusCode != http.StatusOK {
+		var rawErr struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if decErr := json.NewDecoder(resp.Body).Decode(&rawErr); decErr == nil && rawErr.Error.Message != "" {
+			return nil, &APIError{
+				StatusCode: resp.StatusCode,
+				Type:       rawErr.Error.Type,
+				Message:    rawErr.Error.Message,
+			}
+		}
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Type:       "unknown",
+			Message:    fmt.Sprintf("HTTP %d", resp.StatusCode),
+		}
+	}
+
+	var msgResp MessageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&msgResp); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &msgResp, nil
+}
+
 // Stream sends a MessageRequest with stream=true and returns a channel of StreamEvents.
 // The events channel is closed when the stream ends or ctx is cancelled.
 // Any error encountered is sent on the error channel before both channels are closed.

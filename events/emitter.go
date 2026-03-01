@@ -81,7 +81,7 @@ func (e *Emitter) EmitPermissionRequest(requestID, tool string, input json.RawMe
 	})
 }
 
-func (e *Emitter) EmitUsage(inputTokens, outputTokens, cacheRead, cacheWrite int, costUSD float64) {
+func (e *Emitter) EmitUsage(inputTokens, outputTokens, cacheRead, cacheWrite int, costUSD float64, sessionUsage *SessionUsage) {
 	e.Emit(&UsageEvent{
 		Event:            Event{Type: "usage", SessionID: e.sessionID},
 		InputTokens:      inputTokens,
@@ -89,6 +89,7 @@ func (e *Emitter) EmitUsage(inputTokens, outputTokens, cacheRead, cacheWrite int
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,
 		CostUSD:          costUSD,
+		SessionUsage:     sessionUsage,
 	})
 }
 

@@ -47,6 +47,16 @@ type UsageEvent struct {
 	CacheReadTokens  int     `json:"cache_read_tokens"`
 	CacheWriteTokens int     `json:"cache_write_tokens"`
 	CostUSD          float64 `json:"cost_usd"`
+	SessionUsage     *SessionUsage `json:"session_usage,omitempty"`
+}
+
+type SessionUsage struct {
+	TotalInputTokens      int     `json:"total_input_tokens"`
+	TotalOutputTokens     int     `json:"total_output_tokens"`
+	TotalCacheReadTokens  int     `json:"total_cache_read_tokens"`
+	TotalCacheWriteTokens int     `json:"total_cache_write_tokens"`
+	TotalCostUSD          float64 `json:"total_cost_usd"`
+	MessageCount          int     `json:"message_count"`
 }
 
 type TurnComplete struct {

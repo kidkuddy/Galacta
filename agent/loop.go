@@ -221,9 +221,22 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 			}
 		}
 
-		// Emit usage with actual cost
+		// Emit usage with actual cost and session totals
 		costUSD := CalculateCost(currentModel, usage.InputTokens, usage.OutputTokens)
-		l.emitter.EmitUsage(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens, costUSD)
+		var sessionUsage *events.SessionUsage
+		if persist && l.store != nil {
+			if totals, err := l.store.GetUsageTotals(); err == nil && totals != nil {
+				sessionUsage = &events.SessionUsage{
+					TotalInputTokens:      totals.TotalInputTokens,
+					TotalOutputTokens:     totals.TotalOutputTokens,
+					TotalCacheReadTokens:  totals.TotalCacheReadTokens,
+					TotalCacheWriteTokens: totals.TotalCacheWriteTokens,
+					TotalCostUSD:          CalculateCost(currentModel, totals.TotalInputTokens, totals.TotalOutputTokens),
+					MessageCount:          totals.MessageCount,
+				}
+			}
+		}
+		l.emitter.EmitUsage(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens, costUSD, sessionUsage)
 
 		// Check budget (only when persisting with a store)
 		if l.maxBudgetUSD > 0 && persist && l.store != nil {
@@ -239,6 +252,16 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 
 		// Append assistant message to history
 		history = append(history, *assistantMsg)
+
+		// Auto-compact if approaching context window limit
+		if persist && shouldAutoCompact(history, currentModel) {
+			compacted, compactErr := l.compactConversation(ctx, history)
+			if compactErr != nil {
+				log.Printf("galacta: auto-compact failed: %v", compactErr)
+			} else {
+				history = compacted
+			}
+		}
 
 		// Check for tool_use blocks
 		var toolUses []toolcaller.ToolCall

@@ -20,3 +20,21 @@ func CalculateCost(model string, inputTokens, outputTokens int) float64 {
 	outputCost := float64(outputTokens) / 1_000_000 * pricing[1]
 	return inputCost + outputCost
 }
+
+// modelContextWindow maps model names to their context window size in tokens.
+var modelContextWindow = map[string]int{
+	"claude-sonnet-4-6":         200000,
+	"claude-sonnet-4-5":         200000,
+	"claude-opus-4-6":           200000,
+	"claude-opus-4-5":           200000,
+	"claude-haiku-4-5":          200000,
+	"claude-haiku-4-5-20251001": 200000,
+}
+
+// ContextWindowSize returns the context window for a model (default 200000).
+func ContextWindowSize(model string) int {
+	if size, ok := modelContextWindow[model]; ok {
+		return size
+	}
+	return 200000
+}

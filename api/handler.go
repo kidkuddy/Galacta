@@ -195,6 +195,8 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 // ListSessions lists all sessions by scanning the sessions directory.
 func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
+	filterDir := r.URL.Query().Get("working_dir")
+
 	sessDir := filepath.Join(h.dataDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
@@ -213,9 +215,16 @@ func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		sessionID := strings.TrimSuffix(entry.Name(), ".db")
 		info := h.sessionInfo(sessionID)
-		if info != nil {
-			sessions = append(sessions, info)
+		if info == nil {
+			continue
 		}
+		if filterDir != "" {
+			wd, _ := info["working_dir"].(string)
+			if wd != filterDir {
+				continue
+			}
+		}
+		sessions = append(sessions, info)
 	}
 
 	if sessions == nil {
@@ -726,18 +735,16 @@ func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 
 // CompactSessionRequest is the request body for compacting a session.
 type CompactSessionRequest struct {
-	KeepMessages int `json:"keep_messages"` // number of recent messages to keep (default 10)
+	Instructions string `json:"instructions,omitempty"` // optional extra instructions for summarization
 }
 
-// CompactSession removes older messages from a session to reduce context.
+// CompactSession summarizes the conversation and replaces old messages with the summary.
+// Uses the same summarization approach as Claude Code's /compact command.
 func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req CompactSessionRequest
 	json.NewDecoder(r.Body).Decode(&req)
-	if req.KeepMessages <= 0 {
-		req.KeepMessages = 10
-	}
 
 	store, err := db.Open(h.dataDir, id)
 	if err != nil {
@@ -752,28 +759,92 @@ func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(messages) <= req.KeepMessages {
+	if len(messages) <= 2 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"compacted":        false,
-			"message_count":    len(messages),
-			"removed_messages": 0,
+			"compacted":     false,
+			"message_count": len(messages),
 		})
 		return
 	}
 
-	// Delete older messages, keep the most recent N
-	toRemove := messages[:len(messages)-req.KeepMessages]
-	removed := 0
-	for _, msg := range toRemove {
-		if err := store.DeleteMessage(msg.ID); err == nil {
-			removed++
+	// Reconstruct conversation history
+	var history []anthropic.Message
+	for _, row := range messages {
+		var content []anthropic.ContentBlock
+		if err := json.Unmarshal([]byte(row.Content), &content); err != nil {
+			continue
+		}
+		history = append(history, anthropic.Message{
+			Role:    row.Role,
+			Content: content,
+		})
+	}
+
+	// Build compact request
+	model, _ := store.GetMeta("model")
+	if model == "" {
+		model = h.defaultModel
+	}
+
+	compactPrompt := agent.CompactUserPrompt
+	if req.Instructions != "" {
+		compactPrompt += "\n\nAdditional instructions: " + req.Instructions
+	}
+
+	compactMessages := make([]anthropic.Message, 0, len(history)+1)
+	compactMessages = append(compactMessages, history...)
+	compactMessages = append(compactMessages, anthropic.NewUserMessage(compactPrompt))
+
+	resp, err := h.apiClient.SendMessage(r.Context(), anthropic.MessageRequest{
+		Model:    model,
+		System:   agent.CompactSystemPrompt,
+		Messages: compactMessages,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("compact API call: %v", err))
+		return
+	}
+
+	// Extract summary
+	var summaryText string
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			summaryText += block.Text
 		}
 	}
 
+	summary := agent.ExtractSummary(summaryText)
+	if summary == "" {
+		writeError(w, http.StatusInternalServerError, "compact response missing <summary> tags")
+		return
+	}
+
+	// Replace all messages with the summary
+	continuationText := fmt.Sprintf("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n%s\n\nPlease continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.", summary)
+
+	preCount := len(messages)
+	for _, row := range messages {
+		store.DeleteMessage(row.ID)
+	}
+
+	summaryContent, _ := json.Marshal([]anthropic.ContentBlock{
+		{Type: "text", Text: continuationText},
+	})
+	store.SaveMessage(&db.MessageRow{
+		ID:      fmt.Sprintf("compact-%s", id[:8]),
+		Role:    "user",
+		Content: string(summaryContent),
+		Model:   model,
+	})
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"compacted":        true,
-		"message_count":    len(messages) - removed,
-		"removed_messages": removed,
+		"compacted":          true,
+		"pre_message_count":  preCount,
+		"post_message_count": 1,
+		"compact_usage": map[string]int{
+			"input_tokens":  resp.Usage.InputTokens,
+			"output_tokens": resp.Usage.OutputTokens,
+		},
 	})
 }
 
