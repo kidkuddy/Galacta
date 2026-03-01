@@ -22,8 +22,13 @@ import (
 	"github.com/kidkuddy/galacta/permissions"
 	"github.com/kidkuddy/galacta/systemprompt"
 	"github.com/kidkuddy/galacta/toolcaller"
+	agenttools "github.com/kidkuddy/galacta/tools/agent"
+	"github.com/kidkuddy/galacta/tools/ask"
 	exectools "github.com/kidkuddy/galacta/tools/exec"
 	"github.com/kidkuddy/galacta/tools/fs"
+	"github.com/kidkuddy/galacta/tools/plan"
+	"github.com/kidkuddy/galacta/tools/skill"
+	"github.com/kidkuddy/galacta/tools/task"
 	"github.com/kidkuddy/galacta/tools/web"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -43,11 +48,12 @@ type Handler struct {
 }
 
 type activeRun struct {
-	session *agent.Session
-	gate    *permissions.InteractiveGate
-	cancel  context.CancelFunc
-	emitter *events.Emitter
-	store   *db.SessionDB
+	session      *agent.Session
+	gate         *permissions.InteractiveGate
+	cancel       context.CancelFunc
+	emitter      *events.Emitter
+	store        *db.SessionDB
+	questionGate *ask.QuestionGate
 }
 
 // MCPServerInfo is returned by the health endpoint.
@@ -322,7 +328,9 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Create per-session MCP tool servers (they need the session's working dir)
-	sessionCaller, sessionClients := h.buildSessionCaller(workingDir)
+	questionGate := ask.NewQuestionGate(emitter)
+	planState := &plan.PlanState{}
+	sessionCaller, sessionClients := h.buildSessionCaller(workingDir, store, emitter, questionGate, planState)
 
 	// Build tool filter from session metadata
 	var toolFilter *toolcaller.ToolFilter
@@ -363,6 +371,10 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	// Build agent loop options
 	loopOpts := &agent.AgentLoopOptions{
 		FallbackModel: fallbackModel,
+		ServerTools: []anthropic.ServerTool{
+			{Type: "web_search_20250305", Name: "web_search", MaxUses: 5},
+		},
+		PlanState: planState,
 	}
 	if maxBudgetStr != "" {
 		fmt.Sscanf(maxBudgetStr, "%f", &loopOpts.MaxBudgetUSD)
@@ -371,6 +383,28 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	// Map effort to thinking config
 	if effort != "" {
 		loopOpts.Thinking = effortToThinking(effort)
+	}
+
+	// Register agent tool (done post-build to avoid circular dep — agent needs the caller)
+	agentSrv := agenttools.NewServer(&agenttools.Deps{
+		Client:     h.apiClient,
+		Caller:     sessionCaller,
+		Emitter:    emitter,
+		Model:      model,
+		WorkingDir: workingDir,
+	})
+	agentMC, err := client.NewInProcessClient(agentSrv)
+	if err == nil {
+		if err := agentMC.Start(ctx); err == nil {
+			initReq := mcp.InitializeRequest{}
+			initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+			initReq.Params.ClientInfo = mcp.Implementation{Name: "galacta", Version: "0.1.0"}
+			if _, err := agentMC.Initialize(ctx, initReq); err == nil {
+				if err := sessionCaller.AddClient(ctx, agentMC); err == nil {
+					sessionClients = append(sessionClients, agentMC)
+				}
+			}
+		}
 	}
 
 	loop := agent.NewAgentLoop(h.apiClient, sessionCaller, gate, emitter, store, model, builtPrompt, loopOpts)
@@ -382,10 +416,11 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 			Model:          model,
 			PermissionMode: permMode,
 		},
-		gate:    gate,
-		cancel:  cancel,
-		emitter: emitter,
-		store:   store,
+		gate:         gate,
+		cancel:       cancel,
+		emitter:      emitter,
+		store:        store,
+		questionGate: questionGate,
 	}
 
 	h.mu.Lock()
@@ -459,6 +494,44 @@ func (h *Handler) RespondPermission(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"approved": req.Approved})
 }
 
+// QuestionResponse is the request body for responding to a question.
+type QuestionResponse struct {
+	Answer string `json:"answer"`
+}
+
+// RespondQuestion responds to a pending question from the ask_user tool.
+func (h *Handler) RespondQuestion(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	requestID := chi.URLParam(r, "requestID")
+
+	var req QuestionResponse
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	h.mu.RLock()
+	run, ok := h.active[id]
+	h.mu.RUnlock()
+
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not running")
+		return
+	}
+
+	if run.questionGate == nil {
+		writeError(w, http.StatusNotFound, "no question gate for session")
+		return
+	}
+
+	if err := run.questionGate.Respond(requestID, req.Answer); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("question not found: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"answered": requestID})
+}
+
 // ListMessages returns all messages in a session.
 func (h *Handler) ListMessages(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -525,7 +598,7 @@ func (h *Handler) sessionInfo(sessionID string) map[string]interface{} {
 
 // buildSessionCaller creates a per-session ToolCaller with built-in MCP tools
 // scoped to the session's working directory, plus any global external tools.
-func (h *Handler) buildSessionCaller(workingDir string) (*toolcaller.Caller, []client.MCPClient) {
+func (h *Handler) buildSessionCaller(workingDir string, store *db.SessionDB, emitter *events.Emitter, questionGate *ask.QuestionGate, planState *plan.PlanState) (*toolcaller.Caller, []client.MCPClient) {
 	registry := toolcaller.NewRegistry()
 	caller := toolcaller.NewCaller(registry, h.maxConcurrency)
 
@@ -541,6 +614,10 @@ func (h *Handler) buildSessionCaller(workingDir string) (*toolcaller.Caller, []c
 		{"fs", fs.NewServer(workingDir)},
 		{"exec", exectools.NewServer(workingDir)},
 		{"web", web.NewServer()},
+		{"task", task.NewServer(store)},
+		{"skill", skill.NewServer(workingDir)},
+		{"ask", ask.NewServer(questionGate)},
+		{"plan", plan.NewServer(planState, emitter)},
 	}
 
 	for _, s := range servers {

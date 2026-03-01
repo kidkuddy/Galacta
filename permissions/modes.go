@@ -61,7 +61,7 @@ func (m *ModeGate) Check(tool string, input json.RawMessage, workingDir string) 
 }
 
 func isReadOnly(tool string) bool {
-	readOnlyPatterns := []string{"read", "glob", "grep", "search", "list", "fetch"}
+	readOnlyPatterns := []string{"read", "glob", "grep", "search", "list", "fetch", "task", "skill", "ask"}
 	for _, p := range readOnlyPatterns {
 		if strings.Contains(tool, p) {
 			return true

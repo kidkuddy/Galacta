@@ -105,3 +105,35 @@ func (e *Emitter) EmitError(message string) {
 		Message: message,
 	})
 }
+
+func (e *Emitter) EmitSubAgentStart(agentType, description string) {
+	e.Emit(&SubAgentStart{
+		Event:       Event{Type: "subagent_start", SessionID: e.sessionID},
+		AgentType:   agentType,
+		Description: description,
+	})
+}
+
+func (e *Emitter) EmitSubAgentEnd(agentType string) {
+	e.Emit(&SubAgentEnd{
+		Event:     Event{Type: "subagent_end", SessionID: e.sessionID},
+		AgentType: agentType,
+	})
+}
+
+func (e *Emitter) EmitQuestionRequest(requestID, question, header string, options []QuestionOption) {
+	e.Emit(&QuestionRequest{
+		Event:     Event{Type: "question_request", SessionID: e.sessionID},
+		RequestID: requestID,
+		Question:  question,
+		Header:    header,
+		Options:   options,
+	})
+}
+
+func (e *Emitter) EmitPlanModeChanged(active bool) {
+	e.Emit(&PlanModeChanged{
+		Event:  Event{Type: "plan_mode_changed", SessionID: e.sessionID},
+		Active: active,
+	})
+}

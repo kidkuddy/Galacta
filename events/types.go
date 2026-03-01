@@ -58,3 +58,32 @@ type ErrorEvent struct {
 	Event
 	Message string `json:"message"`
 }
+
+type SubAgentStart struct {
+	Event
+	AgentType   string `json:"agent_type"`
+	Description string `json:"description,omitempty"`
+}
+
+type SubAgentEnd struct {
+	Event
+	AgentType string `json:"agent_type"`
+}
+
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+type QuestionRequest struct {
+	Event
+	RequestID string           `json:"request_id"`
+	Question  string           `json:"question"`
+	Header    string           `json:"header,omitempty"`
+	Options   []QuestionOption `json:"options,omitempty"`
+}
+
+type PlanModeChanged struct {
+	Event
+	Active bool `json:"active"`
+}

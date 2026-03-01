@@ -24,13 +24,14 @@ func (e *APIError) Error() string {
 
 // MessageRequest is the request body for the Anthropic Messages API.
 type MessageRequest struct {
-	Model     string          `json:"model"`
-	MaxTokens int             `json:"max_tokens"`
-	System    string          `json:"system,omitempty"`
-	Messages  []Message       `json:"messages"`
-	Tools     []Tool          `json:"tools,omitempty"`
-	Stream    bool            `json:"stream"`
-	Thinking  *ThinkingConfig `json:"thinking,omitempty"`
+	Model       string          `json:"model"`
+	MaxTokens   int             `json:"max_tokens"`
+	System      string          `json:"system,omitempty"`
+	Messages    []Message       `json:"messages"`
+	Tools       []Tool          `json:"tools,omitempty"`
+	ServerTools []ServerTool    `json:"-"` // merged into tools via custom MarshalJSON
+	Stream      bool            `json:"stream"`
+	Thinking    *ThinkingConfig `json:"thinking,omitempty"`
 }
 
 // Message represents a single message in the conversation.
@@ -56,6 +57,15 @@ type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// ServerTool describes a server-side tool (e.g. web_search) included in the API request.
+type ServerTool struct {
+	Type           string   `json:"type"`                      // e.g. "web_search_20250305"
+	Name           string   `json:"name"`                      // e.g. "web_search"
+	MaxUses        int      `json:"max_uses,omitempty"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
 }
 
 // MessageResponse is the full response from the Messages API.

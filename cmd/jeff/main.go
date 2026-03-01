@@ -460,6 +460,72 @@ func handleSSEEvent(data string, base string, session string) {
 		reason, _ := event["stop_reason"].(string)
 		fmt.Fprintf(os.Stderr, "%s[done: %s]%s\n", colorDim, reason, colorReset)
 
+	case "subagent_start":
+		agentType, _ := event["agent_type"].(string)
+		description, _ := event["description"].(string)
+		if description != "" {
+			fmt.Fprintf(os.Stderr, "\n%s[agent: %s] %s%s\n", colorCyan, agentType, description, colorReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n%s[agent: %s]%s\n", colorCyan, agentType, colorReset)
+		}
+
+	case "subagent_end":
+		agentType, _ := event["agent_type"].(string)
+		fmt.Fprintf(os.Stderr, "%s[agent: %s done]%s\n", colorDim, agentType, colorReset)
+
+	case "question_request":
+		requestID, _ := event["request_id"].(string)
+		question, _ := event["question"].(string)
+		header, _ := event["header"].(string)
+
+		if header != "" {
+			fmt.Fprintf(os.Stderr, "\n%s[%s]%s %s\n", colorYellow, header, colorReset, question)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n%s[question]%s %s\n", colorYellow, colorReset, question)
+		}
+
+		// Display options if provided
+		if opts, ok := event["options"].([]any); ok && len(opts) > 0 {
+			for i, opt := range opts {
+				if o, ok := opt.(map[string]any); ok {
+					label, _ := o["label"].(string)
+					desc, _ := o["description"].(string)
+					if desc != "" {
+						fmt.Fprintf(os.Stderr, "  %d) %s — %s\n", i+1, label, desc)
+					} else {
+						fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, label)
+					}
+				}
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "Answer: ")
+		reader := bufio.NewReader(os.Stdin)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(answer)
+
+		// If user typed a number and we have options, resolve to the label
+		if opts, ok := event["options"].([]any); ok && len(opts) > 0 {
+			var idx int
+			if _, err := fmt.Sscanf(answer, "%d", &idx); err == nil && idx >= 1 && idx <= len(opts) {
+				if o, ok := opts[idx-1].(map[string]any); ok {
+					if label, ok := o["label"].(string); ok {
+						answer = label
+					}
+				}
+			}
+		}
+
+		postJSON(base+"/sessions/"+session+"/question/"+requestID, map[string]string{"answer": answer})
+
+	case "plan_mode_changed":
+		active, _ := event["active"].(bool)
+		if active {
+			fmt.Fprintf(os.Stderr, "%s[plan mode: on]%s\n", colorYellow, colorReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s[plan mode: off]%s\n", colorYellow, colorReset)
+		}
+
 	case "error":
 		msg, _ := event["message"].(string)
 		fmt.Fprintf(os.Stderr, "%s[error] %s%s\n", colorRed, msg, colorReset)

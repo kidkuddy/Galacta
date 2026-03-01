@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/kidkuddy/galacta/anthropic"
@@ -13,6 +14,7 @@ import (
 	"github.com/kidkuddy/galacta/events"
 	"github.com/kidkuddy/galacta/permissions"
 	"github.com/kidkuddy/galacta/toolcaller"
+	"github.com/kidkuddy/galacta/tools/plan"
 	"github.com/google/uuid"
 )
 
@@ -31,6 +33,8 @@ type AgentLoop struct {
 	maxBudgetUSD  float64
 	fallbackModel string
 	thinking      *anthropic.ThinkingConfig
+	serverTools   []anthropic.ServerTool
+	planState     *plan.PlanState
 }
 
 // AgentLoopOptions holds optional configuration for AgentLoop.
@@ -38,6 +42,8 @@ type AgentLoopOptions struct {
 	MaxBudgetUSD  float64
 	FallbackModel string
 	Thinking      *anthropic.ThinkingConfig
+	ServerTools   []anthropic.ServerTool
+	PlanState     *plan.PlanState
 }
 
 // NewAgentLoop creates a new agent loop.
@@ -65,6 +71,8 @@ func NewAgentLoop(
 		l.maxBudgetUSD = opts.MaxBudgetUSD
 		l.fallbackModel = opts.FallbackModel
 		l.thinking = opts.Thinking
+		l.serverTools = opts.ServerTools
+		l.planState = opts.PlanState
 	}
 	return l
 }
@@ -96,22 +104,61 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 	// Get available tools
 	tools := l.caller.ListTools()
 
-	for turn := 0; turn < l.maxTurns; turn++ {
+	_, _, err = l.iterate(ctx, sessionID, history, tools, l.maxTurns, true)
+	return err
+}
+
+// RunSubAgent runs a sub-agent with a fresh history and no DB persistence.
+// Returns the final assistant text output.
+func (l *AgentLoop) RunSubAgent(ctx context.Context, prompt string, maxTurns int, filter *toolcaller.ToolFilter) (string, error) {
+	history := []anthropic.Message{anthropic.NewUserMessage(prompt)}
+
+	var tools []anthropic.Tool
+	if filter != nil {
+		tools = l.caller.FilteredListTools(filter)
+	} else {
+		tools = l.caller.ListTools()
+	}
+
+	history, finalText, err := l.iterate(ctx, "subagent", history, tools, maxTurns, false)
+	if err != nil {
+		return finalText, err
+	}
+	return finalText, nil
+}
+
+// iterate runs the core send -> tool_use -> execute -> tool_result cycle.
+// persist=true saves messages to DB, persist=false keeps them in-memory only.
+// Returns the final history, the last assistant text, and any error.
+func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
+	history []anthropic.Message, tools []anthropic.Tool,
+	maxTurns int, persist bool) ([]anthropic.Message, string, error) {
+
+	var lastText string
+
+	for turn := 0; turn < maxTurns; turn++ {
 		select {
 		case <-ctx.Done():
 			l.emitter.EmitTurnComplete("aborted")
-			return ctx.Err()
+			return history, lastText, ctx.Err()
 		default:
+		}
+
+		// Filter tools if plan mode is active
+		currentTools := tools
+		if l.planState != nil && l.planState.IsActive() {
+			currentTools = filterReadOnly(tools)
 		}
 
 		// Call Anthropic API
 		currentModel := l.model
 		req := anthropic.MessageRequest{
-			Model:    currentModel,
-			System:   l.systemPrompt,
-			Messages: history,
-			Tools:    tools,
-			Thinking: l.thinking,
+			Model:       currentModel,
+			System:      l.systemPrompt,
+			Messages:    history,
+			Tools:       currentTools,
+			ServerTools: l.serverTools,
+			Thinking:    l.thinking,
 		}
 
 		assistantMsg, usage, stopReason, err := l.streamTurn(ctx, sessionID, req)
@@ -127,38 +174,47 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 			if err != nil {
 				l.emitter.EmitError(err.Error())
 				l.emitter.EmitTurnComplete("error")
-				return fmt.Errorf("streaming turn %d: %w", turn, err)
+				return history, lastText, fmt.Errorf("streaming turn %d: %w", turn, err)
 			}
 		}
 
-		// Save assistant message to DB
-		assistantContentJSON, _ := json.Marshal(assistantMsg.Content)
-		if err := l.store.SaveMessage(&db.MessageRow{
-			ID:               uuid.New().String(),
-			Role:             "assistant",
-			Content:          string(assistantContentJSON),
-			InputTokens:      usage.InputTokens,
-			OutputTokens:     usage.OutputTokens,
-			CacheReadTokens:  usage.CacheReadTokens,
-			CacheWriteTokens: usage.CacheWriteTokens,
-			Model:            l.model,
-			StopReason:       stopReason,
-		}); err != nil {
-			log.Printf("galacta: failed to save assistant message: %v", err)
+		// Extract text from assistant message
+		for _, block := range assistantMsg.Content {
+			if block.Type == "text" {
+				lastText = block.Text
+			}
+		}
+
+		// Save assistant message to DB (only when persisting)
+		if persist && l.store != nil {
+			assistantContentJSON, _ := json.Marshal(assistantMsg.Content)
+			if err := l.store.SaveMessage(&db.MessageRow{
+				ID:               uuid.New().String(),
+				Role:             "assistant",
+				Content:          string(assistantContentJSON),
+				InputTokens:      usage.InputTokens,
+				OutputTokens:     usage.OutputTokens,
+				CacheReadTokens:  usage.CacheReadTokens,
+				CacheWriteTokens: usage.CacheWriteTokens,
+				Model:            l.model,
+				StopReason:       stopReason,
+			}); err != nil {
+				log.Printf("galacta: failed to save assistant message: %v", err)
+			}
 		}
 
 		// Emit usage with actual cost
 		costUSD := CalculateCost(currentModel, usage.InputTokens, usage.OutputTokens)
 		l.emitter.EmitUsage(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens, costUSD)
 
-		// Check budget
-		if l.maxBudgetUSD > 0 {
+		// Check budget (only when persisting with a store)
+		if l.maxBudgetUSD > 0 && persist && l.store != nil {
 			totals, _ := l.store.GetUsageTotals()
 			if totals != nil {
 				totalCost := CalculateCost(currentModel, totals.TotalInputTokens, totals.TotalOutputTokens)
 				if totalCost >= l.maxBudgetUSD {
 					l.emitter.EmitTurnComplete("budget_exceeded")
-					return fmt.Errorf("budget exceeded: $%.4f >= $%.2f", totalCost, l.maxBudgetUSD)
+					return history, lastText, fmt.Errorf("budget exceeded: $%.4f >= $%.2f", totalCost, l.maxBudgetUSD)
 				}
 			}
 		}
@@ -181,7 +237,7 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 		// No tool calls — we're done
 		if len(toolUses) == 0 {
 			l.emitter.EmitTurnComplete(stopReason)
-			return nil
+			return history, lastText, nil
 		}
 
 		// Check permissions and execute tool calls
@@ -189,7 +245,7 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 		if err != nil {
 			l.emitter.EmitError(err.Error())
 			l.emitter.EmitTurnComplete("error")
-			return fmt.Errorf("executing tools on turn %d: %w", turn, err)
+			return history, lastText, fmt.Errorf("executing tools on turn %d: %w", turn, err)
 		}
 
 		// Build tool_result content blocks
@@ -205,20 +261,22 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 		}
 		history = append(history, toolResultMsg)
 
-		// Save tool results to DB
-		toolResultJSON, _ := json.Marshal(resultBlocks)
-		if err := l.store.SaveMessage(&db.MessageRow{
-			ID:      uuid.New().String(),
-			Role:    "user",
-			Content: string(toolResultJSON),
-			Model:   l.model,
-		}); err != nil {
-			log.Printf("galacta: failed to save tool result message: %v", err)
+		// Save tool results to DB (only when persisting)
+		if persist && l.store != nil {
+			toolResultJSON, _ := json.Marshal(resultBlocks)
+			if err := l.store.SaveMessage(&db.MessageRow{
+				ID:      uuid.New().String(),
+				Role:    "user",
+				Content: string(toolResultJSON),
+				Model:   l.model,
+			}); err != nil {
+				log.Printf("galacta: failed to save tool result message: %v", err)
+			}
 		}
 	}
 
 	l.emitter.EmitTurnComplete("max_turns")
-	return fmt.Errorf("reached max turns (%d)", l.maxTurns)
+	return history, lastText, fmt.Errorf("reached max turns (%d)", maxTurns)
 }
 
 // streamTurn sends a request and processes the SSE stream for one API call.
@@ -252,6 +310,10 @@ func (l *AgentLoop) streamTurn(ctx context.Context, sessionID string, req anthro
 				// Initialize partial JSON accumulator for tool_use blocks
 				if block.Type == "tool_use" {
 					partialJSON[data.Index] = ""
+				}
+				// Server tool blocks (web_search etc.) — preserve as-is
+				if block.Type == "server_tool_use" || block.Type == "web_search_tool_result" {
+					// These are fully formed from the API, just accumulate
 				}
 			}
 
@@ -324,7 +386,10 @@ func (l *AgentLoop) executeTools(ctx context.Context, sessionID string, toolUses
 	var approved []toolcaller.ToolCall
 	var results []toolcaller.ToolCallResult
 
-	workingDir, _ := l.store.GetMeta("working_dir")
+	var workingDir string
+	if l.store != nil {
+		workingDir, _ = l.store.GetMeta("working_dir")
+	}
 
 	for _, tc := range toolUses {
 		allowed, err := l.gate.CheckAndWait(ctx, tc.Name, tc.Input, workingDir)
@@ -359,6 +424,22 @@ func (l *AgentLoop) executeTools(ctx context.Context, sessionID string, toolUses
 	}
 
 	return results, nil
+}
+
+// filterReadOnly returns only tools whose names match read-only patterns.
+func filterReadOnly(tools []anthropic.Tool) []anthropic.Tool {
+	readOnlyPatterns := []string{"read", "glob", "grep", "search", "list", "fetch", "task", "skill", "ask", "plan"}
+	var filtered []anthropic.Tool
+	for _, t := range tools {
+		lower := strings.ToLower(t.Name)
+		for _, p := range readOnlyPatterns {
+			if strings.Contains(lower, p) {
+				filtered = append(filtered, t)
+				break
+			}
+		}
+	}
+	return filtered
 }
 
 // loadHistory reconstructs the conversation history from the DB.
