@@ -194,8 +194,10 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListSessions lists all sessions by scanning the sessions directory.
+// Archived sessions are excluded unless ?include_archived is present.
 func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	filterDir := r.URL.Query().Get("working_dir")
+	includeArchived := r.URL.Query().Has("include_archived")
 
 	sessDir := filepath.Join(h.dataDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
@@ -217,6 +219,11 @@ func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		info := h.sessionInfo(sessionID)
 		if info == nil {
 			continue
+		}
+		if !includeArchived {
+			if archived, _ := info["archived"].(bool); archived {
+				continue
+			}
 		}
 		if filterDir != "" {
 			wd, _ := info["working_dir"].(string)
@@ -586,6 +593,7 @@ func (h *Handler) sessionInfo(sessionID string) map[string]interface{} {
 	permMode, _ := store.GetMeta("permission_mode")
 	updatedAt, _ := store.GetMeta("updated_at")
 	usage, _ := store.GetUsageTotals()
+	archived, _ := store.IsArchived()
 
 	h.mu.RLock()
 	_, running := h.active[sessionID]
@@ -604,11 +612,31 @@ func (h *Handler) sessionInfo(sessionID string) map[string]interface{} {
 		"permission_mode": permMode,
 		"status":          status,
 		"updated_at":      updatedAt,
+		"archived":        archived,
 	}
 	if usage != nil {
 		info["usage"] = usage
 	}
 	return info
+}
+
+// ArchiveSession marks a session as archived so it no longer appears in listings by default.
+func (h *Handler) ArchiveSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	store, err := db.Open(h.dataDir, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+		return
+	}
+	defer store.Close()
+
+	if err := store.SetArchived(true); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("archiving session: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"archived": id})
 }
 
 // buildSessionCaller creates a per-session ToolCaller with built-in MCP tools

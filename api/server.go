@@ -35,6 +35,7 @@ func NewServer(h *Handler, port int) *Server {
 	r.Patch("/sessions/{id}", h.UpdateSession)
 	r.Get("/sessions/{id}/tasks", h.ListTasks)
 	r.Post("/sessions/{id}/compact", h.CompactSession)
+	r.Post("/sessions/{id}/archive", h.ArchiveSession)
 	r.Get("/skills", h.ListSkills)
 	r.Get("/usage", h.GetAccountUsage)
 
