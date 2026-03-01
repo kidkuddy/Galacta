@@ -28,16 +28,16 @@ Galacta implements its own tool definitions (prefixed `galacta_*`) rather than u
 
 | Claude Code Tool | Status | Priority | Notes |
 |-----------------|--------|----------|-------|
-| WebSearch | Missing | Medium | Web search via API. Galacta only has fetch, not search |
-| NotebookEdit | Missing | Low | Jupyter notebook cell editing. Niche use case |
 | Agent | Missing | **High** | Sub-agent spawning. Core to Claude Code's delegation model |
-| TaskCreate/Get/Update/List | Missing | Medium | Task tracking for multi-step work |
-| TeamCreate/Delete | Missing | Low | Multi-agent team coordination |
-| SendMessage | Missing | Low | Inter-agent messaging |
+| Skill | Missing | **High** | Slash command / skill invocation (`/commit`, `/review-pr`, etc.) |
+| TaskCreate/Get/Update/List | Missing | **High** | Todo list — multi-step task tracking, dependencies, progress |
 | EnterPlanMode/ExitPlanMode | Missing | Medium | Plan-then-execute workflow |
 | AskUserQuestion | Missing | Medium | Structured user prompts with options |
+| WebSearch | Missing | Medium | Web search via API. Galacta only has fetch, not search |
+| TeamCreate/Delete | Missing | Low | Multi-agent team coordination (depends on Agent) |
+| SendMessage | Missing | Low | Inter-agent messaging (depends on Agent) |
 | EnterWorktree | Missing | Low | Git worktree isolation |
-| Skill | Missing | Low | Slash command / skill invocation |
+| ~~NotebookEdit~~ | Skipped | — | Jupyter notebook cell editing. Not needed |
 
 ### Key Gap: Agent Tool
 
