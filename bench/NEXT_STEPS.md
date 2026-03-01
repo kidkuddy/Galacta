@@ -1,84 +1,46 @@
-# Next Steps: Herald → Galacta Extraction
+# Next Steps
 
-## Phase 1: Rename
+## Completed
 
-- Rename the daemon binary from `herald` to `galacta`
-- Rename the CLI binary from `hld` to `jeff` (Galacta's herald)
-- Update all internal references: package names, log prefixes, help text, API paths, env vars, config keys
-- Update bench scripts and docs to use new names
-- Remove the `herald_ls` tool (no Claude Code equivalent, Bash covers it)
+All phases from the original extraction plan have been completed:
 
-## Phase 2: Priority Features (from COMPAT.md)
+- [x] Rename daemon from `herald` to `galacta`, CLI from `hld` to `jeff`
+- [x] Default system prompt with tool guidance, CLAUDE.md discovery, environment context
+- [x] Agent tool — sub-agent spawning (general-purpose, explore, plan types)
+- [x] Skill tool — built-in and user-defined skill execution
+- [x] Task tools — task creation, listing, updates, dependencies
+- [x] Team tools — multi-agent teams, messaging, coordination
+- [x] AskUserQuestion — structured prompts with options
+- [x] EnterPlanMode / ExitPlanMode — plan-then-execute workflow
+- [x] WebSearch — web search via Anthropic server tool
+- [x] Worktree — git worktree isolation
+- [x] CLI flags: `--effort`, `--output-format`, `--max-budget-usd`, `--tools`, `--allowedTools`, `--fallback-model`, `--continue`, `--system-prompt`
+- [x] Slash commands: `/cost`, `/model`, `/permissions`, `/compact`, `/tasks`, `/skills`, `/plan`, `/help`
+- [x] Jeff CLI visual overhaul — spinners, box-drawn UI, session banner, multiline input
+- [x] Extract to own repo at `github.com/kidkuddy/Galacta`
 
-Before extracting, address the highest-impact gaps:
+## Remaining Work
 
-### P0 — System Prompt
-- Add a default system prompt that ships with Galacta
-- Include tool usage guidance (use read not cat, use edit not sed, etc.)
-- Include safety rails for destructive operations (git push, rm -rf, etc.)
-- Support CLAUDE.md / project instruction loading
-- Keep it overridable per-session
+### Benchmark Updates
 
-### P1 — Agent Tool
-- Implement sub-agent spawning within the daemon
-- Agent types: general-purpose (full tools), explore (read-only), plan (read-only + plan output)
-- Each sub-agent runs as a separate session/goroutine in the daemon
-- Parent session can wait for or stream sub-agent results
+1. **Update bench script** — rename `herald`/`hld` references to `galacta`/`jeff` in `bench.sh`
+2. **Add tool execution benchmarks** — scenarios that exercise `galacta_bash`, `galacta_read`, `galacta_grep` to measure tool dispatch overhead
+3. **Multi-turn benchmarks** — 5-10 message conversations to test memory growth and session state management
+4. **Higher concurrency tests** — C=16, C=32 to find the scaling ceiling
+5. **Re-run all benchmarks** — fresh numbers with the current codebase
 
-### P2 — Missing Tools
-- `WebSearch` — web search via API (Brave, Google, etc.)
-- `AskUserQuestion` — structured prompts with options, sent as events to the client
-- `EnterPlanMode` / `ExitPlanMode` — plan-then-execute workflow (flag on session)
+### Feature Gaps
 
-### P3 — Session Management
-- `/clear` equivalent — reset conversation history
-- `/compact` equivalent — summarize and compress context
-- Model switching per-message (not just per-session)
-- `jeff run` should output session ID to stderr for scripting
+| Feature | Priority | Notes |
+|---------|----------|-------|
+| `/diff` | Medium | Show uncommitted git changes |
+| `/export` | Low | Export conversation as markdown |
+| `/fork` | Low | Fork conversation at current point |
+| `/rewind` | Low | Rewind to previous turn |
+| Multi-root directories | Low | `--add-dir` for multiple working dirs |
 
-### P4 — CLI Flags
-- `--effort` (reasoning effort level)
-- `--output-format` (text, json, stream-json)
-- `--max-budget-usd` (spending cap)
-- `--tools` / `--allowedTools` / `--disallowedTools` (tool filtering)
+### Quality
 
-## Phase 3: Extract to Own Repo
-
-1. Create repo at `github.com/kidkuddy/galacta`
-2. New `go.mod` with module `github.com/kidkuddy/galacta`
-3. Directory structure:
-   ```
-   galacta/
-   ├── cmd/
-   │   ├── galacta/        # daemon entry point
-   │   └── jeff/           # CLI entry point
-   ├── anthropic/          # API client
-   ├── agent/              # agent loop
-   ├── api/                # HTTP API server
-   ├── db/                 # SQLite session store
-   ├── events/             # SSE event system
-   ├── permissions/        # permission modes
-   ├── tools/              # built-in MCP tool servers
-   │   ├── fs/             # filesystem tools
-   │   ├── exec/           # bash execution
-   │   └── web/            # web fetch
-   ├── toolcaller/         # tool registry and dispatch
-   ├── bench/              # benchmarks and reports
-   ├── Makefile
-   ├── README.md
-   ├── COMPAT.md
-   └── REPORT.md
-   ```
-4. Move all code from `backend/pkg/herald/` → root packages
-5. Move `backend/cmd/herald/` → `cmd/galacta/`
-6. Move `backend/cmd/hld/` → `cmd/jeff/`
-7. Preserve full git history via `git log` (commit messages stay intact)
-8. Same 3 external deps: mcp-go, sqlite, uuid
-
-## Phase 4: Clean Up gnz
-
-1. Remove `backend/pkg/herald/` from gnz repo
-2. Remove `backend/cmd/herald/` and `backend/cmd/hld/` from gnz
-3. Remove herald-related entries from gnz Makefile (if any)
-4. Commit the removal
-5. If gnz ever needs to import galacta: `go get github.com/kidkuddy/galacta`
+- Increase benchmark runs to 5+ for tighter confidence intervals
+- Higher-frequency RSS sampling (50ms instead of 200ms)
+- Add CI integration for automated benchmark regression tracking
