@@ -49,7 +49,8 @@ func interactiveLoop(base, session, outputFormat string) {
 		if inMultiline {
 			rl.SetPrompt("\033[2m... \033[0m")
 		} else {
-			rl.SetPrompt("\n\033[1m> \033[0m")
+			fmt.Fprint(stderr, "\n")
+			rl.SetPrompt("\033[1m> \033[0m")
 		}
 
 		line, err := rl.Readline()

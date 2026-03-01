@@ -58,6 +58,22 @@ func LoadConfig() *Config {
 	return cfg
 }
 
+// KeyFunc returns a function that reads the freshest API key available.
+// The client caches the result and only calls this again on 401 to refresh.
+// For static keys (env var) it returns the cached value; for OAuth (keychain)
+// it re-reads so refreshed tokens are picked up.
+func (c *Config) KeyFunc() func() string {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return func() string { return c.APIKey }
+	}
+	return func() string {
+		if k := readKeychainAPIKey(); k != "" {
+			return k
+		}
+		return c.APIKey
+	}
+}
+
 func defaultDataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

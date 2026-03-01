@@ -33,7 +33,7 @@ func New(cfg *Config) (*Galacta, error) {
 		return nil, fmt.Errorf("creating data dir: %w", err)
 	}
 
-	apiClient := anthropic.NewClient(cfg.APIKey)
+	apiClient := anthropic.NewClient(cfg.KeyFunc())
 
 	// Global registry for external MCP servers only
 	// Built-in tools (fs, exec, web) are created per-session in the handler

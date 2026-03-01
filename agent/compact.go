@@ -80,15 +80,19 @@ func autoCompactThreshold(model string) int {
 	return contextWindow - maxOutput - autoCompactBuffer
 }
 
-// estimateTokens gives a rough char/4 estimate for the conversation history.
+// shouldAutoCompact returns true if the actual input token count from the API
+// response has exceeded the auto-compact threshold.
+func shouldAutoCompact(inputTokens int, model string) bool {
+	return inputTokens >= autoCompactThreshold(model)
+}
+
+// estimateTokens gives a rough char/4 estimate for logging purposes only.
 func estimateTokens(messages []anthropic.Message) int {
 	total := 0
 	for _, msg := range messages {
 		for _, block := range msg.Content {
 			switch block.Type {
-			case "text":
-				total += len(block.Text) / 4
-			case "thinking":
+			case "text", "thinking":
 				total += len(block.Text) / 4
 			case "tool_use":
 				total += len(block.Input) / 4
@@ -99,11 +103,6 @@ func estimateTokens(messages []anthropic.Message) int {
 		}
 	}
 	return total
-}
-
-// shouldAutoCompact returns true if the conversation has exceeded the auto-compact threshold.
-func shouldAutoCompact(messages []anthropic.Message, model string) bool {
-	return estimateTokens(messages) >= autoCompactThreshold(model)
 }
 
 // compactConversation summarizes the conversation using Claude and replaces old messages

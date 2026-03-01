@@ -253,8 +253,8 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 		// Append assistant message to history
 		history = append(history, *assistantMsg)
 
-		// Auto-compact if approaching context window limit
-		if persist && shouldAutoCompact(history, currentModel) {
+		// Auto-compact if approaching context window limit (use actual token count from API)
+		if persist && shouldAutoCompact(usage.InputTokens, currentModel) {
 			compacted, compactErr := l.compactConversation(ctx, history)
 			if compactErr != nil {
 				log.Printf("galacta: auto-compact failed: %v", compactErr)

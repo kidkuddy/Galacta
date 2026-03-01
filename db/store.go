@@ -159,6 +159,25 @@ func (s *SessionDB) GetMeta(key string) (string, error) {
 	return value, nil
 }
 
+// IsArchived returns true if the session has been archived.
+func (s *SessionDB) IsArchived() (bool, error) {
+	val, err := s.GetMeta("archived")
+	if err != nil {
+		// Key not found — not archived
+		return false, nil
+	}
+	return val == "1", nil
+}
+
+// SetArchived sets or clears the archived flag on the session.
+func (s *SessionDB) SetArchived(archived bool) error {
+	val := "0"
+	if archived {
+		val = "1"
+	}
+	return s.SetMeta("archived", val)
+}
+
 // DeleteMessage removes a message by ID.
 func (s *SessionDB) DeleteMessage(id string) error {
 	_, err := s.db.Exec("DELETE FROM messages WHERE id = ?", id)
