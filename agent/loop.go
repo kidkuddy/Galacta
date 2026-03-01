@@ -487,24 +487,62 @@ func filterReadOnly(tools []anthropic.Tool) []anthropic.Tool {
 }
 
 // loadHistory reconstructs the conversation history from the DB.
+// It detects and removes orphaned tool_use blocks at the end of the history
+// (assistant messages with tool_use that lack a following tool_result).
 func (l *AgentLoop) loadHistory() ([]anthropic.Message, error) {
 	rows, err := l.store.ListMessages()
 	if err != nil {
 		return nil, err
 	}
 
-	var messages []anthropic.Message
+	type indexedMessage struct {
+		msg   anthropic.Message
+		rowID string
+	}
+
+	var indexed []indexedMessage
 	for _, row := range rows {
 		var content []anthropic.ContentBlock
 		if err := json.Unmarshal([]byte(row.Content), &content); err != nil {
 			log.Printf("galacta: skipping message %s: invalid content JSON: %v", row.ID, err)
 			continue
 		}
-		messages = append(messages, anthropic.Message{
-			Role:    row.Role,
-			Content: content,
+		indexed = append(indexed, indexedMessage{
+			msg: anthropic.Message{
+				Role:    row.Role,
+				Content: content,
+			},
+			rowID: row.ID,
 		})
 	}
 
+	// Detect orphaned tool_use at the end of history: the last message is an
+	// assistant message containing tool_use blocks with no following tool_result.
+	if len(indexed) > 0 {
+		last := indexed[len(indexed)-1]
+		if last.msg.Role == "assistant" && hasToolUse(last.msg.Content) {
+			log.Printf("galacta: removing orphaned tool_use message %s (no tool_result follows)", last.rowID)
+			if err := l.store.DeleteMessage(last.rowID); err != nil {
+				log.Printf("galacta: failed to delete orphaned message: %v", err)
+			}
+			indexed = indexed[:len(indexed)-1]
+		}
+	}
+
+	messages := make([]anthropic.Message, len(indexed))
+	for i, im := range indexed {
+		messages[i] = im.msg
+	}
+
 	return messages, nil
+}
+
+// hasToolUse returns true if any content block is a tool_use block.
+func hasToolUse(blocks []anthropic.ContentBlock) bool {
+	for _, b := range blocks {
+		if b.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
 }

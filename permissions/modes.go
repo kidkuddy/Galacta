@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -15,19 +16,27 @@ const (
 )
 
 // ModeGate implements Gate for a specific permission mode.
+// The mode is stored atomically so it can be updated safely during a live run.
 type ModeGate struct {
-	mode string
+	mode atomic.Value // stores string
 }
 
 func NewModeGate(mode string) *ModeGate {
-	return &ModeGate{mode: mode}
+	g := &ModeGate{}
+	g.mode.Store(mode)
+	return g
+}
+
+// SetMode updates the permission mode in place, taking effect on the next Check call.
+func (m *ModeGate) SetMode(mode string) {
+	m.mode.Store(mode)
 }
 
 // Check implements Gate.
 func (m *ModeGate) Check(tool string, input json.RawMessage, workingDir string) Decision {
 	lower := strings.ToLower(tool)
 
-	switch m.mode {
+	switch m.mode.Load().(string) {
 	case ModeBypassPermissions, ModeDontAsk:
 		return Allow
 

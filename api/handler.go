@@ -53,6 +53,7 @@ type Handler struct {
 
 type activeRun struct {
 	session      *agent.Session
+	modeGate     *permissions.ModeGate
 	gate         *permissions.InteractiveGate
 	cancel       context.CancelFunc
 	emitter      *events.Emitter
@@ -343,10 +344,8 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 
 	emitter := events.NewEmitter(id, 256)
-	gate := permissions.NewInteractiveGate(
-		permissions.NewModeGate(permMode),
-		emitter,
-	)
+	modeGate := permissions.NewModeGate(permMode)
+	gate := permissions.NewInteractiveGate(modeGate, emitter)
 
 	// Create per-session MCP tool servers (they need the session's working dir)
 	questionGate := ask.NewQuestionGate(emitter)
@@ -438,6 +437,7 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 			Model:          model,
 			PermissionMode: permMode,
 		},
+		modeGate:     modeGate,
 		gate:         gate,
 		cancel:       cancel,
 		emitter:      emitter,
@@ -731,6 +731,14 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		store.SetMeta("permission_mode", req.PermissionMode)
+
+		// If the session is currently running, update the live gate immediately.
+		h.mu.RLock()
+		run, running := h.active[id]
+		h.mu.RUnlock()
+		if running {
+			run.modeGate.SetMode(req.PermissionMode)
+		}
 	}
 
 	store.SetMeta("updated_at", time.Now().Format(time.RFC3339))
