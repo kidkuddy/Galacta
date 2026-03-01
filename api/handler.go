@@ -20,6 +20,7 @@ import (
 	"github.com/kidkuddy/galacta/db"
 	"github.com/kidkuddy/galacta/events"
 	"github.com/kidkuddy/galacta/permissions"
+	"github.com/kidkuddy/galacta/systemprompt"
 	"github.com/kidkuddy/galacta/toolcaller"
 	exectools "github.com/kidkuddy/galacta/tools/exec"
 	"github.com/kidkuddy/galacta/tools/fs"
@@ -86,12 +87,17 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 
 // CreateSessionRequest is the request body for creating a session.
 type CreateSessionRequest struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	WorkingDir     string `json:"working_dir"`
-	Model          string `json:"model"`
-	PermissionMode string `json:"permission_mode"`
-	SystemPrompt   string `json:"system_prompt"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	WorkingDir     string   `json:"working_dir"`
+	Model          string   `json:"model"`
+	PermissionMode string   `json:"permission_mode"`
+	SystemPrompt   string   `json:"system_prompt"`
+	Effort         string   `json:"effort"`          // low, medium, high
+	MaxBudgetUSD   float64  `json:"max_budget_usd"`
+	FallbackModel  string   `json:"fallback_model"`
+	Tools          []string `json:"tools"`            // tool allow list
+	AllowedTools   []string `json:"allowed_tools"`    // glob patterns
 }
 
 // CreateSession creates a new session.
@@ -140,6 +146,24 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	store.SetMeta("model", req.Model)
 	store.SetMeta("permission_mode", req.PermissionMode)
 	store.SetMeta("system_prompt", req.SystemPrompt)
+	store.SetMeta("updated_at", time.Now().Format(time.RFC3339))
+	if req.Effort != "" {
+		store.SetMeta("effort", req.Effort)
+	}
+	if req.MaxBudgetUSD > 0 {
+		store.SetMeta("max_budget_usd", fmt.Sprintf("%f", req.MaxBudgetUSD))
+	}
+	if req.FallbackModel != "" {
+		store.SetMeta("fallback_model", req.FallbackModel)
+	}
+	if len(req.Tools) > 0 {
+		toolsJSON, _ := json.Marshal(req.Tools)
+		store.SetMeta("tools", string(toolsJSON))
+	}
+	if len(req.AllowedTools) > 0 {
+		allowedJSON, _ := json.Marshal(req.AllowedTools)
+		store.SetMeta("allowed_tools", string(allowedJSON))
+	}
 	store.Close()
 
 	now := time.Now()
@@ -258,8 +282,13 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	// Load session metadata
 	model, _ := store.GetMeta("model")
 	permMode, _ := store.GetMeta("permission_mode")
-	systemPrompt, _ := store.GetMeta("system_prompt")
+	userSystemPrompt, _ := store.GetMeta("system_prompt")
 	workingDir, _ := store.GetMeta("working_dir")
+	effort, _ := store.GetMeta("effort")
+	maxBudgetStr, _ := store.GetMeta("max_budget_usd")
+	fallbackModel, _ := store.GetMeta("fallback_model")
+	toolsStr, _ := store.GetMeta("tools")
+	allowedToolsStr, _ := store.GetMeta("allowed_tools")
 
 	if model == "" {
 		model = h.defaultModel
@@ -267,6 +296,9 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	if permMode == "" {
 		permMode = "default"
 	}
+
+	// Update the session's updated_at timestamp
+	store.SetMeta("updated_at", time.Now().Format(time.RFC3339))
 
 	// Set up SSE
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -292,7 +324,56 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	// Create per-session MCP tool servers (they need the session's working dir)
 	sessionCaller, sessionClients := h.buildSessionCaller(workingDir)
 
-	loop := agent.NewAgentLoop(h.apiClient, sessionCaller, gate, emitter, store, model, systemPrompt)
+	// Build tool filter from session metadata
+	var toolFilter *toolcaller.ToolFilter
+	if toolsStr != "" || allowedToolsStr != "" {
+		toolFilter = &toolcaller.ToolFilter{}
+		if toolsStr != "" {
+			json.Unmarshal([]byte(toolsStr), &toolFilter.Allow)
+		}
+		if allowedToolsStr != "" {
+			json.Unmarshal([]byte(allowedToolsStr), &toolFilter.Globs)
+		}
+	}
+
+	// Get tool names for system prompt
+	var tools []anthropic.Tool
+	if toolFilter != nil {
+		tools = sessionCaller.FilteredListTools(toolFilter)
+	} else {
+		tools = sessionCaller.ListTools()
+	}
+	toolNames := make([]string, len(tools))
+	for i, t := range tools {
+		toolNames[i] = t.Name
+	}
+
+	// Build system prompt with CLAUDE.md discovery and environment context
+	builtPrompt, err := systemprompt.Build(systemprompt.BuildOptions{
+		WorkingDir:   workingDir,
+		Model:        model,
+		ToolNames:    toolNames,
+		UserOverride: userSystemPrompt,
+	})
+	if err != nil {
+		log.Printf("galacta: failed to build system prompt: %v", err)
+		builtPrompt = userSystemPrompt // fallback to user-provided prompt
+	}
+
+	// Build agent loop options
+	loopOpts := &agent.AgentLoopOptions{
+		FallbackModel: fallbackModel,
+	}
+	if maxBudgetStr != "" {
+		fmt.Sscanf(maxBudgetStr, "%f", &loopOpts.MaxBudgetUSD)
+	}
+
+	// Map effort to thinking config
+	if effort != "" {
+		loopOpts.Thinking = effortToThinking(effort)
+	}
+
+	loop := agent.NewAgentLoop(h.apiClient, sessionCaller, gate, emitter, store, model, builtPrompt, loopOpts)
 
 	run := &activeRun{
 		session: &agent.Session{
@@ -415,6 +496,7 @@ func (h *Handler) sessionInfo(sessionID string) map[string]interface{} {
 	model, _ := store.GetMeta("model")
 	workingDir, _ := store.GetMeta("working_dir")
 	permMode, _ := store.GetMeta("permission_mode")
+	updatedAt, _ := store.GetMeta("updated_at")
 	usage, _ := store.GetUsageTotals()
 
 	h.mu.RLock()
@@ -433,6 +515,7 @@ func (h *Handler) sessionInfo(sessionID string) map[string]interface{} {
 		"working_dir":     workingDir,
 		"permission_mode": permMode,
 		"status":          status,
+		"updated_at":      updatedAt,
 	}
 	if usage != nil {
 		info["usage"] = usage
@@ -500,4 +583,18 @@ func isValidPermissionMode(mode string) bool {
 		return true
 	}
 	return false
+}
+
+// effortToThinking maps effort level to Anthropic thinking configuration.
+func effortToThinking(effort string) *anthropic.ThinkingConfig {
+	switch effort {
+	case "low":
+		return &anthropic.ThinkingConfig{Type: "enabled", BudgetTokens: 1024}
+	case "medium":
+		return &anthropic.ThinkingConfig{Type: "enabled", BudgetTokens: 4096}
+	case "high":
+		return &anthropic.ThinkingConfig{Type: "enabled", BudgetTokens: 16384}
+	default:
+		return nil
+	}
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -19,14 +20,24 @@ const defaultMaxTurns = 100
 
 // AgentLoop runs the core send → tool_use → execute → tool_result cycle.
 type AgentLoop struct {
-	client      *anthropic.Client
-	caller      *toolcaller.Caller
-	gate        *permissions.InteractiveGate
-	emitter     *events.Emitter
-	store       *db.SessionDB
-	model       string
-	systemPrompt string
-	maxTurns    int
+	client        *anthropic.Client
+	caller        *toolcaller.Caller
+	gate          *permissions.InteractiveGate
+	emitter       *events.Emitter
+	store         *db.SessionDB
+	model         string
+	systemPrompt  string
+	maxTurns      int
+	maxBudgetUSD  float64
+	fallbackModel string
+	thinking      *anthropic.ThinkingConfig
+}
+
+// AgentLoopOptions holds optional configuration for AgentLoop.
+type AgentLoopOptions struct {
+	MaxBudgetUSD  float64
+	FallbackModel string
+	Thinking      *anthropic.ThinkingConfig
 }
 
 // NewAgentLoop creates a new agent loop.
@@ -38,8 +49,9 @@ func NewAgentLoop(
 	store *db.SessionDB,
 	model string,
 	systemPrompt string,
+	opts *AgentLoopOptions,
 ) *AgentLoop {
-	return &AgentLoop{
+	l := &AgentLoop{
 		client:       client,
 		caller:       caller,
 		gate:         gate,
@@ -49,6 +61,12 @@ func NewAgentLoop(
 		systemPrompt: systemPrompt,
 		maxTurns:     defaultMaxTurns,
 	}
+	if opts != nil {
+		l.maxBudgetUSD = opts.MaxBudgetUSD
+		l.fallbackModel = opts.FallbackModel
+		l.thinking = opts.Thinking
+	}
+	return l
 }
 
 // Run executes the agent loop for a single user message.
@@ -87,18 +105,30 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 		}
 
 		// Call Anthropic API
+		currentModel := l.model
 		req := anthropic.MessageRequest{
-			Model:    l.model,
+			Model:    currentModel,
 			System:   l.systemPrompt,
 			Messages: history,
 			Tools:    tools,
+			Thinking: l.thinking,
 		}
 
 		assistantMsg, usage, stopReason, err := l.streamTurn(ctx, sessionID, req)
 		if err != nil {
-			l.emitter.EmitError(err.Error())
-			l.emitter.EmitTurnComplete("error")
-			return fmt.Errorf("streaming turn %d: %w", turn, err)
+			// Check for overloaded (529) and try fallback model
+			var apiErr *anthropic.APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == 529 && l.fallbackModel != "" {
+				log.Printf("galacta: model %s overloaded, falling back to %s", currentModel, l.fallbackModel)
+				currentModel = l.fallbackModel
+				req.Model = currentModel
+				assistantMsg, usage, stopReason, err = l.streamTurn(ctx, sessionID, req)
+			}
+			if err != nil {
+				l.emitter.EmitError(err.Error())
+				l.emitter.EmitTurnComplete("error")
+				return fmt.Errorf("streaming turn %d: %w", turn, err)
+			}
 		}
 
 		// Save assistant message to DB
@@ -117,8 +147,21 @@ func (l *AgentLoop) Run(ctx context.Context, sessionID, message string) error {
 			log.Printf("galacta: failed to save assistant message: %v", err)
 		}
 
-		// Emit usage
-		l.emitter.EmitUsage(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens, 0)
+		// Emit usage with actual cost
+		costUSD := CalculateCost(currentModel, usage.InputTokens, usage.OutputTokens)
+		l.emitter.EmitUsage(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens, costUSD)
+
+		// Check budget
+		if l.maxBudgetUSD > 0 {
+			totals, _ := l.store.GetUsageTotals()
+			if totals != nil {
+				totalCost := CalculateCost(currentModel, totals.TotalInputTokens, totals.TotalOutputTokens)
+				if totalCost >= l.maxBudgetUSD {
+					l.emitter.EmitTurnComplete("budget_exceeded")
+					return fmt.Errorf("budget exceeded: $%.4f >= $%.2f", totalCost, l.maxBudgetUSD)
+				}
+			}
+		}
 
 		// Append assistant message to history
 		history = append(history, *assistantMsg)

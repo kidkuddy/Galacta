@@ -1,15 +1,36 @@
 package anthropic
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// ThinkingConfig controls extended thinking behavior.
+type ThinkingConfig struct {
+	Type         string `json:"type"`                    // "enabled" | "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // only when type="enabled"
+}
+
+// APIError represents a structured error from the Anthropic API.
+type APIError struct {
+	StatusCode int
+	Type       string
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("api error %d: %s: %s", e.StatusCode, e.Type, e.Message)
+}
 
 // MessageRequest is the request body for the Anthropic Messages API.
 type MessageRequest struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	System    string    `json:"system,omitempty"`
-	Messages  []Message `json:"messages"`
-	Tools     []Tool    `json:"tools,omitempty"`
-	Stream    bool      `json:"stream"`
+	Model     string          `json:"model"`
+	MaxTokens int             `json:"max_tokens"`
+	System    string          `json:"system,omitempty"`
+	Messages  []Message       `json:"messages"`
+	Tools     []Tool          `json:"tools,omitempty"`
+	Stream    bool            `json:"stream"`
+	Thinking  *ThinkingConfig `json:"thinking,omitempty"`
 }
 
 // Message represents a single message in the conversation.

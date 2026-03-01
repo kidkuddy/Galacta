@@ -93,16 +93,24 @@ func (c *Client) Stream(ctx context.Context, req MessageRequest) (<-chan StreamE
 
 		if resp.StatusCode != http.StatusOK {
 			close(events)
-			var apiErr struct {
+			var rawErr struct {
 				Error struct {
 					Type    string `json:"type"`
 					Message string `json:"message"`
 				} `json:"error"`
 			}
-			if decErr := json.NewDecoder(resp.Body).Decode(&apiErr); decErr == nil && apiErr.Error.Message != "" {
-				errCh <- fmt.Errorf("api error %d: %s: %s", resp.StatusCode, apiErr.Error.Type, apiErr.Error.Message)
+			if decErr := json.NewDecoder(resp.Body).Decode(&rawErr); decErr == nil && rawErr.Error.Message != "" {
+				errCh <- &APIError{
+					StatusCode: resp.StatusCode,
+					Type:       rawErr.Error.Type,
+					Message:    rawErr.Error.Message,
+				}
 			} else {
-				errCh <- fmt.Errorf("api error %d", resp.StatusCode)
+				errCh <- &APIError{
+					StatusCode: resp.StatusCode,
+					Type:       "unknown",
+					Message:    fmt.Sprintf("HTTP %d", resp.StatusCode),
+				}
 			}
 			return
 		}

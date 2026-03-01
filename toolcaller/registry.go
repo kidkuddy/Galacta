@@ -3,6 +3,7 @@ package toolcaller
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"sync"
 
 	"github.com/kidkuddy/galacta/anthropic"
@@ -82,6 +83,89 @@ func (r *Registry) Add(name string, ref ToolRef) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[name] = ref
+}
+
+// ToolFilter controls which tools are visible to the model.
+type ToolFilter struct {
+	Allow []string // explicit allow list (if non-empty, only these tools are available)
+	Deny  []string // explicit deny list
+	Globs []string // glob patterns for allowed tools
+}
+
+// Matches returns true if the given tool name passes the filter.
+func (f *ToolFilter) Matches(name string) bool {
+	if f == nil {
+		return true
+	}
+
+	// Check deny list first
+	for _, d := range f.Deny {
+		if d == name {
+			return false
+		}
+	}
+
+	// If allow list is set, tool must be in it
+	if len(f.Allow) > 0 {
+		for _, a := range f.Allow {
+			if a == name {
+				return true
+			}
+		}
+		// Not in allow list, check globs
+		if len(f.Globs) == 0 {
+			return false
+		}
+	}
+
+	// Check glob patterns
+	if len(f.Globs) > 0 {
+		for _, pattern := range f.Globs {
+			if matched, _ := filepath.Match(pattern, name); matched {
+				return true
+			}
+		}
+		// If we have globs but no allow list, globs are the allow list
+		if len(f.Allow) == 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// FilteredTools returns Anthropic tools filtered by the given filter.
+func (r *Registry) FilteredTools(filter *ToolFilter) []anthropic.Tool {
+	if filter == nil {
+		return r.ToAnthropicTools()
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var tools []anthropic.Tool
+	for _, ref := range r.tools {
+		if !filter.Matches(ref.Tool.Name) {
+			continue
+		}
+		schema, err := json.Marshal(ref.Tool.InputSchema)
+		if err != nil {
+			if ref.Tool.RawInputSchema != nil {
+				schema = ref.Tool.RawInputSchema
+			} else {
+				continue
+			}
+		}
+		if ref.Tool.RawInputSchema != nil {
+			schema = ref.Tool.RawInputSchema
+		}
+		tools = append(tools, anthropic.Tool{
+			Name:        ref.Tool.Name,
+			Description: ref.Tool.Description,
+			InputSchema: json.RawMessage(schema),
+		})
+	}
+	return tools
 }
 
 // ToAnthropicTools converts all registered tools to the format expected by the

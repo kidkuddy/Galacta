@@ -128,6 +128,21 @@ func (c *Caller) ListTools() []anthropic.Tool {
 	return c.registry.ToAnthropicTools()
 }
 
+// FilteredListTools returns tools filtered by the given filter.
+func (c *Caller) FilteredListTools(filter *ToolFilter) []anthropic.Tool {
+	return c.registry.FilteredTools(filter)
+}
+
+// ListToolNames returns just the names of all registered tools.
+func (c *Caller) ListToolNames() []string {
+	refs := c.registry.ListNamed()
+	names := make([]string, len(refs))
+	for i, ref := range refs {
+		names[i] = ref.Name
+	}
+	return names
+}
+
 // ListToolRefs returns all raw ToolRef entries.
 func (c *Caller) ListToolRefs() []NamedToolRef {
 	return c.registry.ListNamed()

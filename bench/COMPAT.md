@@ -1,35 +1,36 @@
-# Herald vs Claude Code: Compatibility Matrix
+# Galacta/Jeff vs Claude Code: Compatibility Matrix
 
 **Baseline:** Claude Code CLI v2.1.63
 **Date:** 2026-03-01
+
+> **Galacta** = daemon (handles conversations, tool execution, agent loop)
+> **Jeff** = CLI client (interacts with Galacta via HTTP/SSE API)
 
 ---
 
 ## Tools
 
-Herald implements its own tool definitions (prefixed `herald_*`) rather than using Claude Code's tool names and prompts. Claude Code's tool system includes detailed system prompts with usage instructions baked into each tool description — Herald does not replicate any of this.
+Galacta implements its own tool definitions (prefixed `galacta_*`) rather than using Claude Code's tool names and prompts. Claude Code's tool system includes detailed system prompts with usage instructions baked into each tool description — Galacta does not replicate any of this.
 
 ### Implemented
 
-| Claude Code Tool | Herald Equivalent | Notes |
+| Claude Code Tool | Galacta Equivalent | Notes |
 |-----------------|-------------------|-------|
-| Read | `herald_read` | Line numbers, offset/limit support |
-| Write | `herald_write` | Creates parent dirs |
-| Edit | `herald_edit` | old_string/new_string with replace_all |
-| Glob | `herald_glob` | Pattern matching, newest-first |
-| Grep | `herald_grep` | Regex search, context lines, output modes |
-| Bash | `herald_bash` | Timeout support (120s default, 600s max) |
-| WebFetch | `herald_web_fetch` | URL fetch with max_bytes, strips HTML |
-
-Herald also has `herald_ls` (directory listing) which has no direct Claude Code equivalent — Claude Code uses Bash for `ls`.
+| Read | `galacta_read` | Line numbers, offset/limit support |
+| Write | `galacta_write` | Creates parent dirs |
+| Edit | `galacta_edit` | old_string/new_string with replace_all |
+| Glob | `galacta_glob` | Pattern matching, newest-first |
+| Grep | `galacta_grep` | Regex search, context lines, output modes |
+| Bash | `galacta_bash` | Timeout support (120s default, 600s max) |
+| WebFetch | `galacta_web_fetch` | URL fetch with max_bytes, strips HTML |
 
 ### NOT Implemented
 
 | Claude Code Tool | Status | Priority | Notes |
 |-----------------|--------|----------|-------|
-| WebSearch | Missing | Medium | Web search via API. Herald only has fetch, not search |
+| WebSearch | Missing | Medium | Web search via API. Galacta only has fetch, not search |
 | NotebookEdit | Missing | Low | Jupyter notebook cell editing. Niche use case |
-| Agent | Missing | High | Sub-agent spawning. Core to Claude Code's delegation model |
+| Agent | Missing | **High** | Sub-agent spawning. Core to Claude Code's delegation model |
 | TaskCreate/Get/Update/List | Missing | Medium | Task tracking for multi-step work |
 | TeamCreate/Delete | Missing | Low | Multi-agent team coordination |
 | SendMessage | Missing | Low | Inter-agent messaging |
@@ -40,14 +41,14 @@ Herald also has `herald_ls` (directory listing) which has no direct Claude Code 
 
 ### Key Gap: Agent Tool
 
-The Agent tool is Claude Code's most architecturally significant capability — it spawns sub-agents with their own tool access, context, and specializations (Explore, Plan, general-purpose). Herald has no equivalent. This means Herald sessions can't:
+The Agent tool is Claude Code's most architecturally significant capability — it spawns sub-agents with their own tool access, context, and specializations (Explore, Plan, general-purpose). Galacta has no equivalent. This means Galacta sessions can't:
 - Delegate research to a background agent
 - Run parallel investigations
 - Use specialized agent types (code explorer, planner)
 
-## System Prompts
+## System Prompt
 
-**Claude Code** injects a substantial system prompt that includes:
+**Claude Code** injects a substantial default system prompt that includes:
 - Detailed per-tool usage instructions (when to use Read vs Bash, Edit vs Write, etc.)
 - Git commit conventions and safety protocols
 - PR creation workflow
@@ -56,131 +57,132 @@ The Agent tool is Claude Code's most architecturally significant capability — 
 - CLAUDE.md file contents (project-specific instructions)
 - Tone and formatting rules
 
-**Herald** sends no default system prompt. The `system_prompt` field is optional and user-provided per session. This means:
-- The model gets no guidance on tool usage patterns
-- No safety rails for destructive operations
-- No conventions for git, PRs, or code style
-- No CLAUDE.md integration
+**Galacta** now builds a default system prompt via the `systemprompt` package:
+- [x] Default system prompt with tool usage guidance
+- [x] CLAUDE.md discovery and injection
+- [x] Environment context injection (OS, shell, git status, model)
+- [x] Safety rails for destructive operations
+- [x] Git/PR conventions
 
-This is a significant behavioral difference. Claude Code's system prompt is what makes the model reliably use the right tool for the job (e.g., "use Read instead of cat", "use Edit instead of sed"). Without it, the model may make suboptimal tool choices or miss safety checks.
+User-provided system prompts (via `--system-prompt` flag or session creation) are appended to the built default.
 
 ## Slash Commands
 
-Claude Code supports ~55 built-in slash commands. Herald has none. These fall into several categories:
+### Currently Implemented in Jeff
 
-### Session Management
-| Command | Description |
-|---------|-------------|
-| `/clear` `/reset` `/new` | Clear conversation history |
-| `/compact [instructions]` | Compact conversation with optional focus |
-| `/resume` `/continue` | Resume previous conversation |
-| `/fork [name]` | Fork conversation at current point |
-| `/rename [name]` | Rename current session |
-| `/rewind` `/checkpoint` | Rewind to previous point |
-| `/export [filename]` | Export conversation as text |
-| `/copy` | Copy last response to clipboard |
+| Command | Notes |
+|---------|-------|
+| `/quit` `/exit` | End session |
+| `/history` | Show conversation history |
+| `/session` | Show session info |
+| `/clear` | Clear screen (visual only, not conversation) |
 
-### Context & Usage
-| Command | Description |
-|---------|-------------|
-| `/context` | Visualize context usage |
-| `/cost` | Show token usage |
-| `/usage` | Plan usage limits and rate limits |
-| `/stats` | Daily usage, session history, streaks |
-| `/model [model]` | Change AI model |
-| `/fast [on\|off]` | Toggle fast mode |
+### Priority 1 — Must Have
 
-### Development Workflow
-| Command | Description |
-|---------|-------------|
-| `/diff` | Interactive diff viewer for uncommitted changes |
-| `/pr-comments [PR]` | Fetch GitHub PR comments |
-| `/review` | Review PR for quality and security |
-| `/security-review` | Analyze changes for vulnerabilities |
-| `/plan` | Enter plan mode |
-| `/init` | Initialize CLAUDE.md |
-| `/memory` | Edit CLAUDE.md files |
+Core session and context management. These directly impact usability.
 
-### Configuration
-| Command | Description |
-|---------|-------------|
-| `/config` `/settings` | Open settings |
-| `/permissions` `/allowed-tools` | View/update permissions |
-| `/hooks` | Manage hook configurations |
-| `/keybindings` | Keybindings config |
-| `/terminal-setup` | Terminal keybindings |
-| `/statusline` | Configure status line |
-| `/theme` | Change color theme |
-| `/vim` | Toggle vim mode |
-| `/sandbox` | Toggle sandbox mode |
-| `/output-style [style]` | Switch output styles |
+| Command | Description | Implementation |
+|---------|-------------|----------------|
+| `/compact [instructions]` | Compact conversation with optional focus | Galacta API — summarize + truncate history |
+| `/cost` | Show token usage | Jeff client — aggregate from `usage` events |
+| `/context` | Visualize context window usage | Jeff client — show tokens used vs limit |
+| `/model [model]` | Change model mid-session | Galacta API — update session metadata |
+| `/diff` | Show uncommitted git changes | Jeff client — run `git diff` locally |
+| `/help` | Show available commands | Jeff client — local |
+| `/status` | Version, model, session info | Jeff client — combine local + session info |
 
-### Extensions
-| Command | Description |
-|---------|-------------|
-| `/mcp` | Manage MCP servers |
-| `/plugin` | Manage plugins |
-| `/skills` | List available skills |
-| `/agents` | Manage agent configurations |
-| `/add-dir <path>` | Add working directory |
+### Priority 2 — Should Have
 
-### Account & System
-| Command | Description |
-|---------|-------------|
-| `/login` `/logout` | Auth management |
-| `/doctor` | Diagnose installation |
-| `/help` | Show help |
-| `/status` | Version, model, account info |
-| `/release-notes` | View changelog |
-| `/feedback` `/bug` | Submit feedback |
-| `/upgrade` | Upgrade plan |
-| `/exit` `/quit` | Exit CLI |
+Workflow features that make the tool competitive for real development use.
 
-### Which Matter for Herald
+| Command | Description | Implementation |
+|---------|-------------|----------------|
+| `/new` `/reset` | Start fresh conversation (keep session) | Galacta API — clear history |
+| `/resume` `/continue` | Resume previous session | Jeff client — already has `-s` flag, add as slash cmd |
+| `/rename [name]` | Rename current session | Galacta API — update session name |
+| `/export [filename]` | Export conversation as text/markdown | Jeff client — format history to file |
+| `/copy` | Copy last response to clipboard | Jeff client — local |
+| `/plan` | Enter plan mode | Galacta API — switch permission mode to `plan` |
+| `/mode [mode]` | Switch permission mode | Galacta API — update session mode |
+| `/pr-comments [PR]` | Fetch GitHub PR comments | Jeff client — `gh` CLI wrapper |
 
-Not all of these are relevant. Herald's daemon architecture means some are handled differently:
+### Priority 3 — Nice to Have
 
-**Should implement (high value):**
-- Session management (clear, compact, resume) — partially exists via API
-- Context visualization — useful for monitoring token usage
-- Model switching — per-session model override
+Power-user features. Not blocking for CC parity.
 
-**Could implement (medium value):**
-- Diff viewer — useful but can be done via tools
-- Plan mode — structured workflow
+| Command | Description | Implementation |
+|---------|-------------|----------------|
+| `/fork [name]` | Fork conversation at current point | Galacta API — clone session with history |
+| `/rewind` `/checkpoint` | Rewind to previous turn | Galacta API — truncate history |
+| `/review` | Review PR for quality/security | Jeff client — `gh` wrapper + prompt |
+| `/security-review` | Analyze changes for vulnerabilities | Jeff client — prompt-based |
+| `/fast [on\|off]` | Toggle fast mode | Jeff client — model switch shorthand |
+| `/stats` | Usage stats, session history | Jeff client — aggregate from DB |
+| `/mcp` | Manage MCP servers | Jeff client — config management |
+| `/add-dir <path>` | Add working directory | Galacta API — multi-root support |
 
-**Not applicable:**
-- Account management (login/logout) — Herald uses API keys directly
-- IDE integrations, plugins, themes — Herald is headless
-- GitHub app installs, Slack integration — out of scope
+### Not Applicable
 
-## CLI Flags
+These don't apply to Galacta's headless daemon architecture:
 
-Claude Code supports several flags that Herald doesn't:
+| Command | Reason |
+|---------|--------|
+| `/login` `/logout` | Galacta uses API keys directly |
+| `/config` `/settings` | No TUI settings editor |
+| `/permissions` `/allowed-tools` | Managed via `--mode` flag |
+| `/hooks` | Not implemented (different extension model) |
+| `/keybindings` `/terminal-setup` | Jeff is a simple CLI, not a TUI |
+| `/statusline` `/theme` `/vim` | No TUI chrome |
+| `/sandbox` | Galacta runs tools in-process, sandboxing is different |
+| `/output-style` | SSE event stream, not configurable output styles |
+| `/plugin` `/skills` `/agents` | No plugin/skill system |
+| `/init` `/memory` | Depends on CLAUDE.md integration (see System Prompt) |
+| `/doctor` | Different install model |
+| `/release-notes` `/feedback` `/bug` `/upgrade` | Product lifecycle — later |
 
-| Flag | Herald Status | Notes |
+## CLI Flags (Jeff)
+
+### Currently Implemented
+
+| Flag | Notes |
+|------|-------|
+| `--session, -s` | Resume existing session by UUID |
+| `--model, -m` | Model override at session creation |
+| `--dir, -d` | Working directory |
+| `--mode` | Permission mode (default, acceptEdits, bypassPermissions, plan, dontAsk) |
+| `--galacta` | Daemon URL (default: localhost:9090) |
+| `--name` | Session name (on `session create`) |
+| `--id` | Custom session ID (on `session create`) |
+
+### Implemented (New)
+
+| Flag | CC Equivalent | Notes |
 |------|--------------|-------|
-| `--model` | Partial | Set at session creation, not per-message |
-| `--effort` | Missing | Reasoning effort level (low/medium/high) |
-| `--permission-mode` | Implemented | Same modes: default, acceptEdits, bypassPermissions, plan, dontAsk |
-| `--worktree` | Missing | Git worktree auto-creation |
-| `--tmux` | Missing | Tmux session for worktree |
-| `--from-pr` | Missing | Resume from GitHub PR |
-| `--json-schema` | Missing | Structured output validation |
-| `--output-format` | Partial | Herald streams SSE, no json/text toggle |
-| `--max-budget-usd` | Missing | Spending cap |
-| `--continue` | Partial | Session resume via `-s` flag |
-| `--mcp-config` | Implemented | External MCP server config |
-| `--tools` | Missing | Tool allow/deny lists |
-| `--allowedTools` | Missing | Glob-pattern tool filtering |
-| `--fallback-model` | Missing | Auto-fallback on overload |
-| `--chrome` | Missing | Browser integration |
+| `--effort` | `--effort` | Reasoning effort (low/medium/high). Maps to thinking budget_tokens |
+| `--system-prompt` | (built-in) | Override/append to default system prompt from CLI |
+| `--max-budget-usd` | `--max-budget-usd` | Spending cap. Tracked via usage totals per session |
+| `--continue` | `--continue` | Resume most recent session (by updated_at) |
+| `--output-format` | `--output-format` | `stream` (default SSE), `json` (raw events), `text` (text only) |
+| `--tools` | `--tools` | Tool allow list |
+| `--allowedTools` | `--allowedTools` | Glob-pattern tool filtering |
+| `--fallback-model` | `--fallback-model` | Auto-fallback on 529 overload |
+
+### Not Applicable
+
+| Flag | Reason |
+|------|--------|
+| `--worktree` | Git worktree — later, depends on EnterWorktree tool |
+| `--tmux` | Tmux integration — out of scope |
+| `--from-pr` | GitHub PR resume — depends on PR workflow |
+| `--json-schema` | Structured output — niche |
+| `--chrome` | Browser integration — out of scope |
 
 ## Version Tracking
 
 | Component | Version | Date |
 |-----------|---------|------|
 | Claude Code CLI | 2.1.63 | 2026-03-01 |
-| Herald | 0.1.0 (pre-release) | 2026-03-01 |
+| Galacta (daemon) | 0.1.0 (pre-release) | 2026-03-01 |
+| Jeff (CLI) | 0.1.0 (pre-release) | 2026-03-01 |
 | Anthropic API | 2023-06-01 | (API version header) |
-| Go | 1.24+ | Herald runtime |
+| Go | 1.24+ | Runtime |

@@ -77,11 +77,19 @@ func printUsage() {
   jeff health                        Check Galacta daemon health
 
 Flags for run:
-  --session, -s    Resume existing session by UUID
-  --model, -m      Model override
-  --dir, -d        Working directory (default: cwd)
-  --mode           Permission mode (default: default)
-  --galacta        Galacta daemon URL (default: http://localhost:9090)
+  --session, -s        Resume existing session by UUID
+  --model, -m          Model override
+  --dir, -d            Working directory (default: cwd)
+  --mode               Permission mode (default: default)
+  --galacta            Galacta daemon URL (default: http://localhost:9090)
+  --system-prompt      Override/append system prompt
+  --continue           Resume most recent session
+  --output-format      Output format: stream (default), json, text
+  --effort             Thinking effort: low, medium, high
+  --max-budget-usd     Maximum spending cap in USD
+  --tools              Tool allow list (repeatable)
+  --allowedTools       Tool glob patterns (repeatable)
+  --fallback-model     Fallback model on overload (529)
 
 Interactive commands (during session):
   /quit, /exit     End the session
@@ -99,16 +107,24 @@ func galactaURL() string {
 
 // runFlags holds parsed flags for the run command.
 type runFlags struct {
-	session string
-	model   string
-	dir     string
-	mode    string
-	base    string
-	message string
+	session       string
+	model         string
+	dir           string
+	mode          string
+	base          string
+	message       string
+	systemPrompt  string
+	continueFlag  bool
+	outputFormat  string // "stream" (default), "json", "text"
+	effort        string // "low", "medium", "high"
+	maxBudgetUSD  float64
+	tools         []string
+	allowedTools  []string
+	fallbackModel string
 }
 
 func parseRunFlags(args []string) runFlags {
-	f := runFlags{base: galactaURL()}
+	f := runFlags{base: galactaURL(), outputFormat: "stream"}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session", "-s":
@@ -136,6 +152,43 @@ func parseRunFlags(args []string) runFlags {
 			if i < len(args) {
 				f.base = args[i]
 			}
+		case "--system-prompt":
+			i++
+			if i < len(args) {
+				f.systemPrompt = args[i]
+			}
+		case "--continue":
+			f.continueFlag = true
+		case "--output-format":
+			i++
+			if i < len(args) {
+				f.outputFormat = args[i]
+			}
+		case "--effort":
+			i++
+			if i < len(args) {
+				f.effort = args[i]
+			}
+		case "--max-budget-usd":
+			i++
+			if i < len(args) {
+				fmt.Sscanf(args[i], "%f", &f.maxBudgetUSD)
+			}
+		case "--tools":
+			i++
+			if i < len(args) {
+				f.tools = append(f.tools, args[i])
+			}
+		case "--allowedTools":
+			i++
+			if i < len(args) {
+				f.allowedTools = append(f.allowedTools, args[i])
+			}
+		case "--fallback-model":
+			i++
+			if i < len(args) {
+				f.fallbackModel = args[i]
+			}
 		default:
 			f.message = args[i]
 		}
@@ -151,6 +204,15 @@ func cmdRun(args []string) {
 
 	// Ensure or create session
 	session := flags.session
+
+	// Handle --continue: find the most recent session
+	if session == "" && flags.continueFlag {
+		session = findMostRecentSession(flags.base)
+		if session == "" {
+			fatal("no previous sessions found to continue")
+		}
+	}
+
 	if session == "" {
 		session = createSession(flags)
 	} else {
@@ -162,20 +224,38 @@ func cmdRun(args []string) {
 
 	// If a message was given on the command line, send it
 	if flags.message != "" {
-		streamMessage(flags.base, session, flags.message)
+		streamMessage(flags.base, session, flags.message, flags.outputFormat)
 	}
 
 	// Enter interactive loop
-	interactiveLoop(flags.base, session)
+	interactiveLoop(flags.base, session, flags.outputFormat)
 }
 
 func createSession(flags runFlags) string {
-	body := map[string]string{"working_dir": flags.dir}
+	body := map[string]any{"working_dir": flags.dir}
 	if flags.model != "" {
 		body["model"] = flags.model
 	}
 	if flags.mode != "" {
 		body["permission_mode"] = flags.mode
+	}
+	if flags.systemPrompt != "" {
+		body["system_prompt"] = flags.systemPrompt
+	}
+	if flags.effort != "" {
+		body["effort"] = flags.effort
+	}
+	if flags.maxBudgetUSD > 0 {
+		body["max_budget_usd"] = flags.maxBudgetUSD
+	}
+	if flags.fallbackModel != "" {
+		body["fallback_model"] = flags.fallbackModel
+	}
+	if len(flags.tools) > 0 {
+		body["tools"] = flags.tools
+	}
+	if len(flags.allowedTools) > 0 {
+		body["allowed_tools"] = flags.allowedTools
 	}
 	resp, err := postJSON(flags.base+"/sessions", body)
 	if err != nil {
@@ -188,7 +268,35 @@ func createSession(flags runFlags) string {
 	return data["id"].(string)
 }
 
-func interactiveLoop(base, session string) {
+func findMostRecentSession(base string) string {
+	resp, err := getJSON(base + "/sessions")
+	if err != nil {
+		return ""
+	}
+	data, ok := resp["data"].([]any)
+	if !ok || len(data) == 0 {
+		return ""
+	}
+
+	// Find session with most recent updated_at
+	var bestID string
+	var bestTime string
+	for _, s := range data {
+		sess, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := sess["id"].(string)
+		updatedAt, _ := sess["updated_at"].(string)
+		if updatedAt > bestTime || bestID == "" {
+			bestTime = updatedAt
+			bestID = id
+		}
+	}
+	return bestID
+}
+
+func interactiveLoop(base, session, outputFormat string) {
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Fprintf(os.Stderr, "\n%s> %s", colorBold, colorReset)
@@ -221,11 +329,11 @@ func interactiveLoop(base, session string) {
 			continue
 		}
 
-		streamMessage(base, session, line)
+		streamMessage(base, session, line, outputFormat)
 	}
 }
 
-func streamMessage(base, session, message string) {
+func streamMessage(base, session, message, outputFormat string) {
 	reqBody, _ := json.Marshal(map[string]string{"message": message})
 	req, err := http.NewRequest("POST", base+"/sessions/"+session+"/message", bytes.NewReader(reqBody))
 	if err != nil {
@@ -256,10 +364,32 @@ func streamMessage(base, session, message string) {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
-			handleSSEEvent(data, base, session)
+			switch outputFormat {
+			case "json":
+				fmt.Println(data)
+			case "text":
+				handleSSEEventText(data)
+			default:
+				handleSSEEvent(data, base, session)
+			}
 		}
 	}
-	fmt.Println()
+	if outputFormat != "json" {
+		fmt.Println()
+	}
+}
+
+// handleSSEEventText handles SSE events in "text" output mode — only prints text content.
+func handleSSEEventText(data string) {
+	var event map[string]any
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return
+	}
+	eventType, _ := event["type"].(string)
+	if eventType == "text_delta" {
+		text, _ := event["text"].(string)
+		fmt.Print(text)
+	}
 }
 
 func handleSSEEvent(data string, base string, session string) {
