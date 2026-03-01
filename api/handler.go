@@ -788,6 +788,42 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, registry.ListInfo())
 }
 
+// GetAccountUsage returns account-wide Anthropic usage from the Admin API.
+func (h *Handler) GetAccountUsage(w http.ResponseWriter, r *http.Request) {
+	period := r.URL.Query().Get("period")
+	if period == "" {
+		period = "today"
+	}
+
+	now := time.Now().UTC()
+	var startingAt, endingAt string
+	endingAt = now.Format("2006-01-02")
+
+	switch period {
+	case "today":
+		startingAt = now.Format("2006-01-02")
+	case "7d":
+		startingAt = now.AddDate(0, 0, -7).Format("2006-01-02")
+	case "30d":
+		startingAt = now.AddDate(0, 0, -30).Format("2006-01-02")
+	default:
+		startingAt = now.Format("2006-01-02")
+	}
+
+	report, err := h.apiClient.GetUsageReport(startingAt, endingAt)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("usage report: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"period":     period,
+		"starting_at": startingAt,
+		"ending_at":   endingAt,
+		"data":       report.Data,
+	})
+}
+
 func isValidPermissionMode(mode string) bool {
 	switch mode {
 	case "default", "acceptEdits", "bypassPermissions", "plan", "dontAsk":

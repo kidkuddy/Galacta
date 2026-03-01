@@ -36,6 +36,7 @@ func NewServer(h *Handler, port int) *Server {
 	r.Get("/sessions/{id}/tasks", h.ListTasks)
 	r.Post("/sessions/{id}/compact", h.CompactSession)
 	r.Get("/skills", h.ListSkills)
+	r.Get("/usage", h.GetAccountUsage)
 
 	return &Server{router: r, handler: h, port: port}
 }

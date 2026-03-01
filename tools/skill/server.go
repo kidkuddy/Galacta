@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -55,6 +57,46 @@ func NewServer(workingDir string) *server.MCPServer {
 		}
 
 		return mcp.NewToolResultText(buf.String()), nil
+	})
+
+	// galacta_register_skill: create a new skill file at runtime
+	registerTool := mcp.NewTool("galacta_register_skill",
+		mcp.WithDescription("Register a new skill by writing a .claude/skills/{name}.md file. The skill becomes immediately available."),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Skill name (used as filename and /command name)")),
+		mcp.WithString("description", mcp.Required(), mcp.Description("Short description of what the skill does")),
+		mcp.WithString("prompt", mcp.Required(), mcp.Description("The prompt template body for the skill")),
+	)
+
+	srv.AddTool(registerTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		name, _ := req.Params.Arguments["name"].(string)
+		description, _ := req.Params.Arguments["description"].(string)
+		prompt, _ := req.Params.Arguments["prompt"].(string)
+
+		if name == "" || description == "" || prompt == "" {
+			return mcp.NewToolResultError("name, description, and prompt are all required"), nil
+		}
+
+		// Ensure skills directory exists
+		skillsDir := filepath.Join(workingDir, ".claude", "skills")
+		if err := os.MkdirAll(skillsDir, 0755); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to create skills directory: %v", err)), nil
+		}
+
+		// Write skill file with frontmatter
+		content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n%s\n", name, description, prompt)
+		path := filepath.Join(skillsDir, name+".md")
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to write skill file: %v", err)), nil
+		}
+
+		// Register in memory for immediate availability
+		registry.Register(SkillDef{
+			Name:        name,
+			Description: description,
+			Prompt:      prompt,
+		})
+
+		return mcp.NewToolResultText(fmt.Sprintf("Skill %q registered at %s", name, path)), nil
 	})
 
 	return srv

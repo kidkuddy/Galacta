@@ -1,32 +1,62 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"strings"
+
+	"github.com/chzyer/readline"
 )
 
 func interactiveLoop(base, session, outputFormat string) {
-	reader := bufio.NewReader(os.Stdin)
+	completer := readline.NewPrefixCompleter(
+		readline.PcItem("/help"),
+		readline.PcItem("/quit"),
+		readline.PcItem("/exit"),
+		readline.PcItem("/session"),
+		readline.PcItem("/model"),
+		readline.PcItem("/permissions"),
+		readline.PcItem("/history"),
+		readline.PcItem("/compact"),
+		readline.PcItem("/clear"),
+		readline.PcItem("/cost"),
+		readline.PcItem("/usage"),
+		readline.PcItem("/tasks"),
+		readline.PcItem("/skills"),
+		readline.PcItem("/plan"),
+	)
+
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "\033[1m> \033[0m",
+		AutoComplete:    completer,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+		Stderr:          stderr.(io.Writer),
+		Stdout:          stderr.(io.Writer),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "%serror initializing readline: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	defer rl.Close()
+
 	inMultiline := false
 	var multilineLines []string
 
 	for {
 		if inMultiline {
-			fmt.Fprintf(stderr, "%s... %s", colorDim, colorReset)
+			rl.SetPrompt("\033[2m... \033[0m")
 		} else {
-			fmt.Fprintf(stderr, "\n%s> %s", colorBold, colorReset)
+			rl.SetPrompt("\n\033[1m> \033[0m")
 		}
 
-		line, err := reader.ReadString('\n')
+		line, err := rl.Readline()
 		if err != nil {
-			// EOF (ctrl-d)
+			// EOF (ctrl-d) or interrupt
 			fmt.Fprintln(stderr)
 			return
 		}
-		line = strings.TrimRight(line, "\n\r")
 
 		// Multiline mode toggle
 		if strings.TrimSpace(line) == `"""` {
@@ -70,8 +100,11 @@ func interactiveLoop(base, session, outputFormat string) {
 		case trimmed == "/clear":
 			fmt.Print("\033[2J\033[H")
 			continue
-		case trimmed == "/cost" || trimmed == "/usage":
+		case trimmed == "/cost":
 			printUsageInfo(base, session)
+			continue
+		case trimmed == "/usage" || strings.HasPrefix(trimmed, "/usage "):
+			printAccountUsage(base, trimmed)
 			continue
 		case trimmed == "/tasks":
 			printTasks(base, session)
@@ -398,6 +431,82 @@ func printSkills(base, session string) {
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxBottom(width), colorReset)
 }
 
+func printAccountUsage(base, line string) {
+	period := "today"
+	parts := strings.Fields(line)
+	if len(parts) > 1 {
+		period = parts[1]
+	}
+
+	resp, err := getJSON(base + "/usage?period=" + period)
+	if err != nil {
+		fmt.Fprintf(stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	data, ok := resp["data"].(map[string]any)
+	if !ok {
+		errMsg, _ := resp["error"].(string)
+		if errMsg != "" {
+			fmt.Fprintf(stderr, "%s  %s%s\n", colorRed, errMsg, colorReset)
+		} else {
+			fmt.Fprintf(stderr, "%s  No usage data.%s\n", colorDim, colorReset)
+		}
+		return
+	}
+
+	buckets, _ := data["data"].([]any)
+	if len(buckets) == 0 {
+		width := 40
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxTop(fmt.Sprintf("Account Usage (%s)", period), width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("No usage data for this period.", width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxBottom(width), colorReset)
+		return
+	}
+
+	// Aggregate by model
+	type modelUsage struct {
+		Input  int
+		Output int
+		Cached int
+	}
+	models := make(map[string]*modelUsage)
+	var modelOrder []string
+	for _, b := range buckets {
+		bucket, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		model, _ := bucket["model"].(string)
+		inTok, _ := bucket["input_tokens"].(float64)
+		outTok, _ := bucket["output_tokens"].(float64)
+		cached, _ := bucket["input_cached_tokens"].(float64)
+
+		if _, exists := models[model]; !exists {
+			models[model] = &modelUsage{}
+			modelOrder = append(modelOrder, model)
+		}
+		m := models[model]
+		m.Input += int(inTok)
+		m.Output += int(outTok)
+		m.Cached += int(cached)
+	}
+
+	width := 40
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxTop(fmt.Sprintf("Account Usage (%s)", period), width), colorReset)
+	for _, model := range modelOrder {
+		m := models[model]
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("", width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", colorBold, boxLine(model, width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(fmt.Sprintf("  Input:   %s tokens", fmtTokens(m.Input)), width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(fmt.Sprintf("  Output:  %s tokens", fmtTokens(m.Output)), width), colorReset)
+		if m.Cached > 0 {
+			fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(fmt.Sprintf("  Cached:  %s tokens", fmtTokens(m.Cached)), width), colorReset)
+		}
+	}
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("", width), colorReset)
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxBottom(width), colorReset)
+}
+
 func printHelp() {
 	width := 47
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxTop("Commands", width), colorReset)
@@ -413,7 +522,8 @@ func printHelp() {
 	fmt.Fprintf(stderr, "%s%s%s\n", colorBold, boxLine("Tasks & Tools", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /tasks         List tasks", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /skills        List available skills", width), colorReset)
-	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /cost          Token usage and cost", width), colorReset)
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /cost          Session token usage", width), colorReset)
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /usage [period] Account usage", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorBold, boxLine("Other", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /plan          Plan mode info", width), colorReset)

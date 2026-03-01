@@ -360,9 +360,12 @@ func (l *AgentLoop) streamTurn(ctx context.Context, sessionID string, req anthro
 				}
 				if err := json.Unmarshal(event.Data, &stopData); err == nil {
 					// If we accumulated partial JSON for this block, set it
-					if pj, ok := partialJSON[stopData.Index]; ok && currentBlock.Type == "tool_use" {
-						currentBlock.Input = json.RawMessage(pj)
-						// Emit tool_start now that we have full input
+					if currentBlock.Type == "tool_use" {
+						if pj, ok := partialJSON[stopData.Index]; ok && pj != "" {
+							currentBlock.Input = json.RawMessage(pj)
+						} else if len(currentBlock.Input) == 0 {
+							currentBlock.Input = json.RawMessage("{}")
+						}
 						l.emitter.EmitToolStart(currentBlock.ID, currentBlock.Name, currentBlock.Input)
 					}
 				}

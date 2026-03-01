@@ -133,6 +133,21 @@ type MessageDelta struct {
 	StopReason string `json:"stop_reason"`
 }
 
+// UsageReport is the response from the Anthropic Admin API usage report endpoint.
+type UsageReport struct {
+	Data []UsageBucket `json:"data"`
+}
+
+// UsageBucket is a single time-bucketed usage entry grouped by model.
+type UsageBucket struct {
+	StartTime           string `json:"start_time"`
+	Model               string `json:"model"`
+	InputTokens         int    `json:"input_tokens"`
+	OutputTokens        int    `json:"output_tokens"`
+	InputCachedTokens   int    `json:"input_cached_tokens"`
+	CacheCreationTokens int    `json:"cache_creation_tokens"`
+}
+
 // NewUserMessage creates a Message with role "user" containing a single text block.
 func NewUserMessage(text string) Message {
 	return Message{

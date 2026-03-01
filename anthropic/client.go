@@ -45,6 +45,57 @@ func NewClientWithBase(apiKey, baseURL string) *Client {
 	}
 }
 
+// GetUsageReport fetches account-wide usage from the Anthropic Admin API.
+// Requires an admin API key; returns an error if the key lacks admin permissions.
+func (c *Client) GetUsageReport(startingAt, endingAt string) (*UsageReport, error) {
+	url := c.baseURL + "/v1/organizations/usage_report/messages?starting_at=" + startingAt + "&ending_at=" + endingAt + "&group_by[]=model&bucket_width=1d"
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	if isOAuthToken(c.apiKey) {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	} else {
+		req.Header.Set("x-api-key", c.apiKey)
+	}
+	req.Header.Set("anthropic-version", apiVersion)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var rawErr struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if decErr := json.NewDecoder(resp.Body).Decode(&rawErr); decErr == nil && rawErr.Error.Message != "" {
+			return nil, &APIError{
+				StatusCode: resp.StatusCode,
+				Type:       rawErr.Error.Type,
+				Message:    rawErr.Error.Message,
+			}
+		}
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Type:       "unknown",
+			Message:    fmt.Sprintf("HTTP %d", resp.StatusCode),
+		}
+	}
+
+	var report UsageReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &report, nil
+}
+
 // Stream sends a MessageRequest with stream=true and returns a channel of StreamEvents.
 // The events channel is closed when the stream ends or ctx is cancelled.
 // Any error encountered is sent on the error channel before both channels are closed.

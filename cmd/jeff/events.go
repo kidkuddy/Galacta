@@ -106,9 +106,9 @@ func handleSSEEvent(data string, base string, session string, ctx *streamContext
 		fmt.Print(text)
 
 	case "thinking_delta":
-		ctx.spinner.Stop()
-		text, _ := event["text"].(string)
-		fmt.Fprintf(stderr, "%s%s%s", colorDim, text, colorReset)
+		// Keep spinner running during extended thinking — don't stop it.
+		// The spinner already shows "Thinking..." which is the right signal.
+		// Printing raw thinking text conflicts with the spinner's line-clearing.
 
 	case "tool_start":
 		ctx.spinner.Stop()
@@ -190,6 +190,7 @@ func handleSSEEvent(data string, base string, session string, ctx *streamContext
 		postJSON(base+"/sessions/"+session+"/permission/"+requestID, map[string]bool{"approved": approved})
 
 	case "usage":
+		ctx.spinner.Stop()
 		inputTok, _ := event["input_tokens"].(float64)
 		outputTok, _ := event["output_tokens"].(float64)
 		costUSD, _ := event["cost_usd"].(float64)
