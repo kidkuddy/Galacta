@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/chzyer/readline"
 )
@@ -103,8 +104,8 @@ func interactiveLoop(base, session, outputFormat string) {
 		case trimmed == "/cost":
 			printUsageInfo(base, session)
 			continue
-		case trimmed == "/usage" || strings.HasPrefix(trimmed, "/usage "):
-			printAccountUsage(base, trimmed)
+		case trimmed == "/usage":
+			printAccountUsage(base)
 			continue
 		case trimmed == "/tasks":
 			printTasks(base, session)
@@ -431,78 +432,84 @@ func printSkills(base, session string) {
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxBottom(width), colorReset)
 }
 
-func printAccountUsage(base, line string) {
-	period := "today"
-	parts := strings.Fields(line)
-	if len(parts) > 1 {
-		period = parts[1]
-	}
-
-	resp, err := getJSON(base + "/usage?period=" + period)
+func printAccountUsage(base string) {
+	resp, err := getJSON(base + "/usage")
 	if err != nil {
 		fmt.Fprintf(stderr, "%serror: %v%s\n", colorRed, err, colorReset)
 		return
 	}
 	data, ok := resp["data"].(map[string]any)
 	if !ok {
-		errMsg, _ := resp["error"].(string)
-		if errMsg != "" {
-			fmt.Fprintf(stderr, "%s  %s%s\n", colorRed, errMsg, colorReset)
-		} else {
-			fmt.Fprintf(stderr, "%s  No usage data.%s\n", colorDim, colorReset)
-		}
+		fmt.Fprintf(stderr, "%s  No usage data yet. Send a message first.%s\n", colorDim, colorReset)
 		return
 	}
 
-	buckets, _ := data["data"].([]any)
-	if len(buckets) == 0 {
-		width := 40
-		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxTop(fmt.Sprintf("Account Usage (%s)", period), width), colorReset)
-		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("No usage data for this period.", width), colorReset)
-		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxBottom(width), colorReset)
+	// Check for no_data status
+	if status, _ := data["status"].(string); status == "no_data" {
+		msg, _ := data["message"].(string)
+		fmt.Fprintf(stderr, "%s  %s%s\n", colorDim, msg, colorReset)
 		return
 	}
 
-	// Aggregate by model
-	type modelUsage struct {
-		Input  int
-		Output int
-		Cached int
-	}
-	models := make(map[string]*modelUsage)
-	var modelOrder []string
-	for _, b := range buckets {
-		bucket, ok := b.(map[string]any)
-		if !ok {
-			continue
-		}
-		model, _ := bucket["model"].(string)
-		inTok, _ := bucket["input_tokens"].(float64)
-		outTok, _ := bucket["output_tokens"].(float64)
-		cached, _ := bucket["input_cached_tokens"].(float64)
-
-		if _, exists := models[model]; !exists {
-			models[model] = &modelUsage{}
-			modelOrder = append(modelOrder, model)
-		}
-		m := models[model]
-		m.Input += int(inTok)
-		m.Output += int(outTok)
-		m.Cached += int(cached)
+	windows, _ := data["windows"].([]any)
+	if len(windows) == 0 {
+		fmt.Fprintf(stderr, "%s  No rate limit data available.%s\n", colorDim, colorReset)
+		return
 	}
 
 	width := 40
-	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxTop(fmt.Sprintf("Account Usage (%s)", period), width), colorReset)
-	for _, model := range modelOrder {
-		m := models[model]
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxTop("Usage", width), colorReset)
+
+	for _, w := range windows {
+		win, ok := w.(map[string]any)
+		if !ok {
+			continue
+		}
+		limitType, _ := win["type"].(string)
+		utilization, _ := win["utilization"].(float64)
+		resetsAt, _ := win["resets_at"].(float64)
+
+		// Map type to display name
+		label := limitType
+		switch limitType {
+		case "five_hour":
+			label = "5-hour limit"
+		case "seven_day":
+			label = "Weekly limit"
+		}
+
+		pct := int(utilization * 100)
+
+		// Color based on utilization
+		pctColor := colorGreen
+		if pct >= 80 {
+			pctColor = colorRed
+		} else if pct >= 50 {
+			pctColor = colorYellow
+		}
+
+		// Progress bar
+		barWidth := width - 6
+		filled := int(utilization * float64(barWidth))
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
 		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("", width), colorReset)
-		fmt.Fprintf(stderr, "%s%s%s\n", colorBold, boxLine(model, width), colorReset)
-		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(fmt.Sprintf("  Input:   %s tokens", fmtTokens(m.Input)), width), colorReset)
-		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(fmt.Sprintf("  Output:  %s tokens", fmtTokens(m.Output)), width), colorReset)
-		if m.Cached > 0 {
-			fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(fmt.Sprintf("  Cached:  %s tokens", fmtTokens(m.Cached)), width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", colorBold, boxLine(label, width), colorReset)
+		fmt.Fprintf(stderr, "%s%s%s%s%s\n", colorCyan, "│ ", pctColor, bar, colorReset)
+		fmt.Fprintf(stderr, "%s%s%s\n", pctColor, boxLine(fmt.Sprintf("  %d%% used", pct), width), colorReset)
+
+		if resetsAt > 0 {
+			resetTime := time.Unix(int64(resetsAt), 0)
+			remaining := time.Until(resetTime)
+			if remaining > 0 {
+				fmt.Fprintf(stderr, "%s%s%s\n", colorDim, boxLine(fmt.Sprintf("  Resets in %s", fmtDuration(remaining)), width), colorReset)
+			}
 		}
 	}
+
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxBottom(width), colorReset)
 }
@@ -523,7 +530,7 @@ func printHelp() {
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /tasks         List tasks", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /skills        List available skills", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /cost          Session token usage", width), colorReset)
-	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /usage [period] Account usage", width), colorReset)
+	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /usage         Rate limit usage", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorBold, boxLine("Other", width), colorReset)
 	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine("  /plan          Plan mode info", width), colorReset)

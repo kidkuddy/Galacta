@@ -788,40 +788,18 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, registry.ListInfo())
 }
 
-// GetAccountUsage returns account-wide Anthropic usage from the Admin API.
+// GetAccountUsage returns rate limit utilization captured from API response headers.
 func (h *Handler) GetAccountUsage(w http.ResponseWriter, r *http.Request) {
-	period := r.URL.Query().Get("period")
-	if period == "" {
-		period = "today"
-	}
-
-	now := time.Now().UTC()
-	var startingAt, endingAt string
-	endingAt = now.Format("2006-01-02")
-
-	switch period {
-	case "today":
-		startingAt = now.Format("2006-01-02")
-	case "7d":
-		startingAt = now.AddDate(0, 0, -7).Format("2006-01-02")
-	case "30d":
-		startingAt = now.AddDate(0, 0, -30).Format("2006-01-02")
-	default:
-		startingAt = now.Format("2006-01-02")
-	}
-
-	report, err := h.apiClient.GetUsageReport(startingAt, endingAt)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("usage report: %v", err))
+	info := h.apiClient.GetRateLimits()
+	if info == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "no_data",
+			"message": "No rate limit data yet. Send a message first.",
+		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"period":     period,
-		"starting_at": startingAt,
-		"ending_at":   endingAt,
-		"data":       report.Data,
-	})
+	writeJSON(w, http.StatusOK, info)
 }
 
 func isValidPermissionMode(mode string) bool {

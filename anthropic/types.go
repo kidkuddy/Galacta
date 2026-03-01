@@ -133,19 +133,16 @@ type MessageDelta struct {
 	StopReason string `json:"stop_reason"`
 }
 
-// UsageReport is the response from the Anthropic Admin API usage report endpoint.
-type UsageReport struct {
-	Data []UsageBucket `json:"data"`
+// RateLimitWindow holds utilization data for a single rate limit window (e.g. 5h, 7d).
+type RateLimitWindow struct {
+	Type        string  `json:"type"`                   // "five_hour" or "seven_day"
+	Utilization float64 `json:"utilization"`             // 0.0–1.0
+	ResetsAt    int64   `json:"resets_at,omitempty"`     // unix timestamp
 }
 
-// UsageBucket is a single time-bucketed usage entry grouped by model.
-type UsageBucket struct {
-	StartTime           string `json:"start_time"`
-	Model               string `json:"model"`
-	InputTokens         int    `json:"input_tokens"`
-	OutputTokens        int    `json:"output_tokens"`
-	InputCachedTokens   int    `json:"input_cached_tokens"`
-	CacheCreationTokens int    `json:"cache_creation_tokens"`
+// RateLimitInfo holds the latest rate limit data captured from API response headers.
+type RateLimitInfo struct {
+	Windows []RateLimitWindow `json:"windows"`
 }
 
 // NewUserMessage creates a Message with role "user" containing a single text block.

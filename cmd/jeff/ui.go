@@ -214,3 +214,15 @@ func fmtTokens(n int) string {
 func fmtCost(usd float64) string {
 	return fmt.Sprintf("$%.4f", usd)
 }
+
+func fmtDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +29,9 @@ type Client struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+
+	rateLimitMu sync.RWMutex
+	rateLimits  *RateLimitInfo
 }
 
 // NewClient creates a Client with the default base URL.
@@ -45,55 +50,52 @@ func NewClientWithBase(apiKey, baseURL string) *Client {
 	}
 }
 
-// GetUsageReport fetches account-wide usage from the Anthropic Admin API.
-// Requires an admin API key; returns an error if the key lacks admin permissions.
-func (c *Client) GetUsageReport(startingAt, endingAt string) (*UsageReport, error) {
-	url := c.baseURL + "/v1/organizations/usage_report/messages?starting_at=" + startingAt + "&ending_at=" + endingAt + "&group_by[]=model&bucket_width=1d"
+// GetRateLimits returns the latest rate limit info captured from API response headers.
+func (c *Client) GetRateLimits() *RateLimitInfo {
+	c.rateLimitMu.RLock()
+	defer c.rateLimitMu.RUnlock()
+	return c.rateLimits
+}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+// parseRateLimitHeaders extracts rate limit utilization and reset from response headers.
+// Headers follow the pattern: anthropic-ratelimit-unified-{abbrev}-utilization / -reset
+// where abbrev is "5h" (five_hour) or "7d" (seven_day).
+func (c *Client) parseRateLimitHeaders(h http.Header) {
+	abbrevs := []struct {
+		abbrev string
+		name   string
+	}{
+		{"5h", "five_hour"},
+		{"7d", "seven_day"},
 	}
 
-	if isOAuthToken(c.apiKey) {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	} else {
-		req.Header.Set("x-api-key", c.apiKey)
-	}
-	req.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var rawErr struct {
-			Error struct {
-				Type    string `json:"type"`
-				Message string `json:"message"`
-			} `json:"error"`
+	var windows []RateLimitWindow
+	for _, a := range abbrevs {
+		utilStr := h.Get("anthropic-ratelimit-unified-" + a.abbrev + "-utilization")
+		if utilStr == "" {
+			continue
 		}
-		if decErr := json.NewDecoder(resp.Body).Decode(&rawErr); decErr == nil && rawErr.Error.Message != "" {
-			return nil, &APIError{
-				StatusCode: resp.StatusCode,
-				Type:       rawErr.Error.Type,
-				Message:    rawErr.Error.Message,
+		util, err := strconv.ParseFloat(utilStr, 64)
+		if err != nil {
+			continue
+		}
+		w := RateLimitWindow{
+			Type:        a.name,
+			Utilization: util,
+		}
+		if resetStr := h.Get("anthropic-ratelimit-unified-" + a.abbrev + "-reset"); resetStr != "" {
+			if v, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+				w.ResetsAt = v
 			}
 		}
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Type:       "unknown",
-			Message:    fmt.Sprintf("HTTP %d", resp.StatusCode),
-		}
+		windows = append(windows, w)
 	}
 
-	var report UsageReport
-	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	if len(windows) > 0 {
+		c.rateLimitMu.Lock()
+		c.rateLimits = &RateLimitInfo{Windows: windows}
+		c.rateLimitMu.Unlock()
 	}
-	return &report, nil
 }
 
 // Stream sends a MessageRequest with stream=true and returns a channel of StreamEvents.
@@ -141,6 +143,9 @@ func (c *Client) Stream(ctx context.Context, req MessageRequest) (<-chan StreamE
 			return
 		}
 		defer resp.Body.Close()
+
+		// Capture rate limit headers from every response (even errors)
+		c.parseRateLimitHeaders(resp.Header)
 
 		if resp.StatusCode != http.StatusOK {
 			close(events)
