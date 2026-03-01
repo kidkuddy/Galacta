@@ -3,7 +3,9 @@ BIN_DIR := bin
 GALACTA := $(BIN_DIR)/galacta
 JEFF := $(BIN_DIR)/jeff
 
-.PHONY: all build galacta jeff clean vet test run health bench
+INSTALL_DIR := /usr/local/bin
+
+.PHONY: all build galacta jeff clean vet test run health bench install uninstall
 
 all: build
 
@@ -39,6 +41,17 @@ health:
 # Run benchmark: Galacta vs Claude Code
 bench: build
 	@bash bench/bench.sh
+
+# Install binaries to INSTALL_DIR (default: /usr/local/bin)
+install: build
+	install -m 755 $(GALACTA) $(INSTALL_DIR)/galacta
+	install -m 755 $(JEFF) $(INSTALL_DIR)/jeff
+	@echo "installed: $(INSTALL_DIR)/galacta $(INSTALL_DIR)/jeff"
+
+# Remove installed binaries
+uninstall:
+	rm -f $(INSTALL_DIR)/galacta $(INSTALL_DIR)/jeff
+	@echo "removed: $(INSTALL_DIR)/galacta $(INSTALL_DIR)/jeff"
 
 # Clean build artifacts
 clean:

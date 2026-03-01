@@ -22,8 +22,9 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+		// Default to "run" with no args
+		cmdRun(nil)
+		return
 	}
 
 	cmd := os.Args[1]
@@ -58,10 +59,12 @@ func main() {
 		}
 	case "health":
 		cmdHealth()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
+	case "help", "--help", "-h":
 		printUsage()
-		os.Exit(1)
+	default:
+		// Unknown subcommand — treat entire args as "run" args
+		// so `jeff "hello"` works as `jeff run "hello"`
+		cmdRun(os.Args[1:])
 	}
 }
 

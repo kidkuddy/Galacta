@@ -177,21 +177,29 @@ func toolBoxBottom(tag string, width int) string {
 
 func printBanner(model, dir, sessionID, mode string) {
 	sid := shortID(sessionID)
-	line1 := fmt.Sprintf("Jeff · %s · %s", model, dir)
-	line2 := fmt.Sprintf("Session: %s · Mode: %s", sid, mode)
 
-	width := len([]rune(line1)) + 4
-	if w2 := len([]rune(line2)) + 4; w2 > width {
-		width = w2
-	}
-	if width < 44 {
-		width = 44
+	shark := []string{
+		`       ╱▔▔▔▔╲        `,
+		`      ╱      ╲       `,
+		`     ╱  ·  ·  ╲      `,
+		`    ╱    ▽▽    ╲     `,
+		`   ╱  ▔▔▔▔▔▔▔▔  ╲   `,
+		`  ▕              ▏   `,
+		`   ╲   ╱    ╲   ╱    `,
+		`    ╲ ╱  jeff ╲╱     `,
 	}
 
-	fmt.Fprintf(stderr, "\n%s%s%s\n", colorCyan, boxTop("", width), colorReset)
-	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(line1, width), colorReset)
-	fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, boxLine(line2, width), colorReset)
-	fmt.Fprintf(stderr, "%s%s%s\n\n", colorCyan, boxBottom(width), colorReset)
+	fmt.Fprintln(stderr)
+	for _, line := range shark {
+		fmt.Fprintf(stderr, "%s%s%s\n", colorCyan, line, colorReset)
+	}
+	fmt.Fprintln(stderr)
+
+	info1 := fmt.Sprintf("  %s%s%s · %s", colorBold, model, colorReset, dir)
+	info2 := fmt.Sprintf("  %sSession: %s · Mode: %s%s", colorDim, sid, mode, colorReset)
+
+	fmt.Fprintf(stderr, "%s\n", info1)
+	fmt.Fprintf(stderr, "%s\n\n", info2)
 }
 
 // Number formatters.
