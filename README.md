@@ -1,169 +1,249 @@
-# Herald
+<p align="center">
+  <img src="assets/logo.png" alt="Galacta" width="200" />
+</p>
 
-A lightweight, native Go agent loop — gnz's replacement for the Claude Code CLI dependency.
+<h1 align="center">Galacta</h1>
 
-Named after the Silver Surfer: the herald that goes ahead, does the work, and reports back.
+<p align="center">
+  A native Go agent daemon with <strong>Jeff</strong>, its terminal CLI.
+</p>
 
 ---
 
 ## What It Is
 
-Herald is a self-contained Go package that implements the Claude agent loop directly against
-the Anthropic API. It replaces the current pattern of shelling out to the `claude` binary
-(`manager.go` → `exec.CommandContext`) with a native in-process implementation.
+Galacta is a self-contained Go implementation of a Claude agent loop that runs as a local HTTP daemon. **Jeff** is the interactive CLI that talks to it — spinners, box-drawn UI, multiline input, and all.
 
-No Node.js. No Bun. No V8. No Ink. No subprocess.
+No Node.js. No Bun. No V8. No subprocess. ~10–15 MB idle.
 
-Memory footprint: ~10–15 MB idle vs ~200–400 MB for the Claude Code CLI.
+---
+
+## Quick Start
+
+```bash
+# Start the daemon
+galacta serve
+
+# Start an interactive session
+jeff run
+
+# One-shot message
+jeff run "explain this codebase"
+
+# Resume last session
+jeff run --continue
+```
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          Herald                                  │
-│                                                                  │
-│  Session ──► AgentLoop ──► AnthropicClient (SSE streaming)      │
-│                │                                                 │
-│                ▼                                                 │
-│           ToolCaller ──► [Bash, Read, Write, Edit, Glob, Grep,  │
-│                           LS, WebFetch, MCP...]                  │
-│                │                                                 │
-│                ▼                                                 │
-│        PermissionGate ──► EventStream (SSE → gnz frontend)      │
-│                                                                  │
-│  ContextManager ──► SQLite (session history, token tracking)    │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                         Galacta Daemon                       │
+│                                                              │
+│  HTTP API ──► AgentLoop ──► Anthropic Client (SSE)          │
+│                  │                                           │
+│                  ▼                                           │
+│             ToolCaller ──► [Bash, Read, Write, Edit, Glob,  │
+│                             Grep, WebFetch, WebSearch,       │
+│                             Agent, Skill, Task, Team, ...]   │
+│                  │                                           │
+│                  ▼                                           │
+│          PermissionGate ──► EventStream (SSE → Jeff CLI)    │
+│                                                              │
+│  SessionDB (SQLite) ──► history, tokens, tasks, metadata    │
+└──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                          Jeff CLI                            │
+│                                                              │
+│  main.go      Entry point, flags, session CRUD, HTTP helpers│
+│  ui.go        Spinner, box drawing, banner, colors          │
+│  events.go    SSE streaming with spinner + styled output    │
+│  commands.go  Interactive loop, /slash commands, multiline  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Components
 
 | Component | Responsibility |
 |-----------|---------------|
-| `AgentLoop` | The main `tool_use` → execute → `tool_result` → repeat cycle |
-| `AnthropicClient` | Streaming Claude API client (SSE, handles `content_block_delta`) |
-| `ToolCaller` | Dispatches tool calls; supports serial and concurrent execution |
-| `ToolExecutor` | Interface each tool implements |
-| `PermissionGate` | Intercepts tool calls requiring user confirmation; suspends loop |
-| `ContextManager` | Tracks conversation history, token usage, applies truncation strategy |
-| `EventStream` | Emits structured SSE events to the gnz frontend |
-| `SessionStore` | Persists session state and history to SQLite (gnz's existing DB) |
+| `AgentLoop` | The `tool_use` → execute → `tool_result` → repeat cycle |
+| `Anthropic Client` | Streaming Claude API client (SSE, content block deltas) |
+| `ToolCaller` | Dispatches tool calls; serial and concurrent execution |
+| `PermissionGate` | Intercepts tool calls requiring user confirmation |
+| `EventEmitter` | Structured SSE events to connected clients |
+| `SessionDB` | SQLite-backed session history, token tracking, tasks |
+| `Team Manager` | Multi-agent teams with messaging and task coordination |
 
 ---
 
-## Tool Inventory
+## Jeff CLI
 
-These are all tools Claude Code supports. Herald implements the ones marked ✓ in Phase 1.
+Jeff is the terminal interface to Galacta. It provides:
+
+- **Spinner indicators** — animated braille spinner during thinking and tool execution
+- **Box-drawn tool output** — tool inputs, outputs, and durations in styled boxes
+- **Session banner** — model, directory, session ID, and permission mode on start
+- **Multiline input** — type `"""` to enter/exit multiline mode
+- **Styled permission prompts** — double-line box for approval requests
+- **Question UI** — numbered options in a box for interactive questions
+
+### Interactive Commands
+
+| Command | Description |
+|---------|-------------|
+| `/session` | Show session info |
+| `/model [name]` | Show or change model |
+| `/permissions [mode]` | Show or change permission mode |
+| `/history` | Conversation history |
+| `/compact [N]` | Compact conversation (keep last N messages) |
+| `/clear` | Clear screen |
+| `/tasks` | List tasks with status icons |
+| `/skills` | List available skills |
+| `/cost` | Token usage and estimated cost |
+| `/plan` | Plan mode info |
+| `/help` | Show all commands |
+| `/quit` | End session |
+
+### CLI Flags
+
+```
+jeff run [flags] ["message"]
+
+  --session, -s        Resume session by UUID
+  --model, -m          Model override
+  --dir, -d            Working directory (default: cwd)
+  --mode               Permission mode
+  --continue           Resume most recent session
+  --output-format      stream | json | text
+  --effort             low | medium | high
+  --max-budget-usd     Spending cap in USD
+  --tools              Tool allow list (repeatable)
+  --allowedTools       Tool glob patterns (repeatable)
+  --fallback-model     Fallback model on overload
+  --galacta            Daemon URL (default: http://localhost:9090)
+  --system-prompt      Override/append system prompt
+```
+
+---
+
+## Tools
 
 ### File System
 
-| Tool | Claude Code name | Priority | Notes |
-|------|-----------------|----------|-------|
-| Read | `Read` | P0 | Read file, with line offset/limit |
-| Write | `Write` | P0 | Overwrite or create file |
-| Edit | `Edit` | P0 | Exact string replace (`old_string` / `new_string`); hardest to get right |
-| MultiEdit | `MultiEdit` | P1 | Batch edits in one call |
-| Glob | `Glob` | P0 | File pattern matching, sorted by mtime |
-| Grep | `Grep` | P0 | ripgrep-equivalent; regex, file type filter, context lines |
-| LS | `LS` | P0 | Directory listing with ignore patterns |
+| Tool | Description |
+|------|-------------|
+| `galacta_read` | Read file with optional line offset/limit |
+| `galacta_write` | Create or overwrite file |
+| `galacta_edit` | Exact string replacement |
+| `galacta_glob` | File pattern matching |
+| `galacta_grep` | Regex search with context lines |
+| `galacta_ls` | Directory listing |
 
 ### Execution
 
-| Tool | Claude Code name | Priority | Notes |
-|------|-----------------|----------|-------|
-| Bash | `Bash` | P0 | Shell exec; cwd, env, timeout, cancellation. PTY for interactive |
+| Tool | Description |
+|------|-------------|
+| `galacta_bash` | Shell execution with timeout and cancellation |
 
 ### Web
 
-| Tool | Claude Code name | Priority | Notes |
-|------|-----------------|----------|-------|
-| WebFetch | `WebFetch` | P2 | HTTP fetch, HTML→markdown |
-| WebSearch | `WebSearch` | P2 | Web search (requires search API key) |
+| Tool | Description |
+|------|-------------|
+| `galacta_web_fetch` | HTTP fetch with HTML-to-markdown |
+| `galacta_web_search` | Web search (Anthropic server tool) |
 
-### Notebooks
+### Agent & Orchestration
 
-| Tool | Claude Code name | Priority | Notes |
-|------|-----------------|----------|-------|
-| NotebookRead | `NotebookRead` | P3 | Read Jupyter .ipynb |
-| NotebookEdit | `NotebookEdit` | P3 | Edit notebook cells |
+| Tool | Description |
+|------|-------------|
+| `galacta_agent` | Spawn sub-agents for parallel work |
+| `galacta_skill` | Execute named skills (built-in or user-defined) |
+| `galacta_task_*` | Task creation, listing, and updates |
+| `galacta_team_*` | Team creation, messaging, and coordination |
+| `galacta_ask_user` | Interactive questions with options |
+| `galacta_enter_plan_mode` | Enter plan mode for implementation planning |
+| `galacta_worktree` | Git worktree isolation |
 
-### Agent / Meta
+### MCP (Dynamic)
 
-| Tool | Claude Code name | Priority | Notes |
-|------|-----------------|----------|-------|
-| Task | `Task` | P2 | Spawn sub-agent with its own loop |
-| TodoRead | `TodoRead` | P1 | Read session todo list |
-| TodoWrite | `TodoWrite` | P1 | Write session todo list |
-
-### MCP (dynamic)
-
-MCP tools are registered at runtime as `mcp__{server}__{tool}` based on connected servers.
-Herald acts as an MCP client; gnz's own MCP server is auto-connected per session.
+External MCP tools are registered at runtime as `mcp__{server}__{tool}` based on connected MCP servers.
 
 ---
 
 ## Permission Modes
 
-Inherited from Claude Code. Controls which tool calls require user confirmation.
-
 | Mode | Behavior |
 |------|----------|
 | `default` | Ask before bash commands and writes outside cwd |
 | `acceptEdits` | Auto-approve file edits; ask before bash |
-| `bypassPermissions` | No prompts — execute everything automatically |
-| `plan` | Read-only; no writes or bash execution |
-| `dontAsk` | Auto-approve everything (alias for bypassPermissions) |
-
-Permission prompts suspend the agent loop and emit a `permission_request` SSE event.
-The gnz frontend responds via a POST to resume or reject.
+| `bypassPermissions` | No prompts — execute everything |
+| `plan` | Read-only; no writes or bash |
+| `dontAsk` | Auto-approve everything |
 
 ---
 
-## Event Format
+## API
 
-Herald emits NDJSON events over SSE. The schema is Herald-native (not Claude Code compat):
+Galacta exposes an HTTP API on port 9090 (default).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Daemon status |
+| `POST` | `/sessions` | Create session |
+| `GET` | `/sessions` | List sessions |
+| `GET` | `/sessions/{id}` | Get session info |
+| `PATCH` | `/sessions/{id}` | Update session (model, mode) |
+| `DELETE` | `/sessions/{id}` | Delete session |
+| `POST` | `/sessions/{id}/message` | Send message (SSE stream) |
+| `GET` | `/sessions/{id}/messages` | List message history |
+| `POST` | `/sessions/{id}/compact` | Compact conversation |
+| `GET` | `/sessions/{id}/tasks` | List tasks |
+| `POST` | `/sessions/{id}/permission/{rid}` | Respond to permission |
+| `POST` | `/sessions/{id}/question/{rid}` | Respond to question |
+| `GET` | `/skills?working_dir=...` | List available skills |
+
+### SSE Event Types
 
 ```jsonc
-// Text streaming
-{ "type": "text_delta", "session_id": "...", "text": "..." }
-
-// Tool call starting
-{ "type": "tool_start", "session_id": "...", "tool": "Bash", "input": { "command": "ls" } }
-
-// Tool result
-{ "type": "tool_result", "session_id": "...", "tool": "Bash", "output": "...", "error": null }
-
-// Permission request (loop suspended)
-{ "type": "permission_request", "session_id": "...", "tool": "Bash", "input": { "command": "rm -rf /tmp/x" } }
-
-// Turn complete
-{ "type": "turn_complete", "session_id": "...", "stop_reason": "end_turn" }
-
-// Usage / cost tracking
-{ "type": "usage", "session_id": "...", "input_tokens": 1234, "output_tokens": 456, "cache_read_tokens": 0, "cache_write_tokens": 0 }
-
-// Error
-{ "type": "error", "session_id": "...", "message": "..." }
+{ "type": "text_delta", "text": "..." }
+{ "type": "thinking_delta", "text": "..." }
+{ "type": "tool_start", "tool": "galacta_bash", "input": { "command": "ls" } }
+{ "type": "tool_result", "tool": "galacta_bash", "output": "...", "duration_ms": 23 }
+{ "type": "permission_request", "request_id": "...", "tool": "...", "input": { ... } }
+{ "type": "question_request", "request_id": "...", "question": "...", "options": [...] }
+{ "type": "usage", "input_tokens": 1234, "output_tokens": 456 }
+{ "type": "turn_complete", "stop_reason": "end_turn" }
+{ "type": "plan_mode_changed", "active": true }
+{ "type": "subagent_start", "agent_type": "general-purpose", "description": "..." }
+{ "type": "team_created", "team_name": "..." }
+{ "type": "team_message", "from": "...", "recipient": "...", "summary": "..." }
+{ "type": "error", "message": "..." }
 ```
 
 ---
 
-## Integration with gnz
+## Skills
 
-Herald replaces the subprocess model in `backend/internal/modules/claude/manager.go`.
+Skills are reusable prompt templates. Define custom skills in `.claude/skills/*.md`:
 
-The `Manager` struct stays; `spawnProcess` is replaced with a call into `herald.Run(session, eventsCh)`.
-Session state (history, token counts, working directory) moves from in-memory to SQLite.
+```markdown
+---
+name: my-skill
+description: Does something useful
+---
+Your prompt template here. Use {{.Args}} for arguments.
+```
 
-The gnz MCP server is auto-wired as an MCP client connection per session — same as today,
-minus the temp JSON config file.
+Built-in skills: `commit`, `review-pr`. List all with `/skills` in Jeff or `GET /skills`.
 
 ---
 
 ## Non-Goals
 
-- Terminal UI / TUI rendering
+- Terminal UI / TUI rendering (Jeff is intentionally simple ANSI)
 - Claude Code CLI compatibility mode
-- Multi-user / networked deployment (single operator desktop tool)
-- Sandboxing / containerized bash execution (operator tool, trust the user)
+- Multi-user / networked deployment
+- Sandboxed bash execution
