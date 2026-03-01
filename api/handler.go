@@ -22,6 +22,7 @@ import (
 	"github.com/kidkuddy/galacta/permissions"
 	"github.com/kidkuddy/galacta/systemprompt"
 	"github.com/kidkuddy/galacta/toolcaller"
+	"github.com/kidkuddy/galacta/team"
 	agenttools "github.com/kidkuddy/galacta/tools/agent"
 	"github.com/kidkuddy/galacta/tools/ask"
 	exectools "github.com/kidkuddy/galacta/tools/exec"
@@ -29,7 +30,9 @@ import (
 	"github.com/kidkuddy/galacta/tools/plan"
 	"github.com/kidkuddy/galacta/tools/skill"
 	"github.com/kidkuddy/galacta/tools/task"
+	teamtools "github.com/kidkuddy/galacta/tools/team"
 	"github.com/kidkuddy/galacta/tools/web"
+	"github.com/kidkuddy/galacta/tools/worktree"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -42,6 +45,7 @@ type Handler struct {
 	globalCaller   *toolcaller.Caller // holds external MCP tools (shared across sessions)
 	defaultModel   string
 	maxConcurrency int
+	teamManager    *team.Manager
 
 	mu       sync.RWMutex
 	active   map[string]*activeRun
@@ -71,6 +75,7 @@ func NewHandler(dataDir string, apiClient *anthropic.Client, globalCaller *toolc
 		globalCaller:   globalCaller,
 		defaultModel:   defaultModel,
 		maxConcurrency: maxConcurrency,
+		teamManager:    team.NewManager(dataDir),
 		active:         make(map[string]*activeRun),
 	}
 }
@@ -387,11 +392,12 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Register agent tool (done post-build to avoid circular dep — agent needs the caller)
 	agentSrv := agenttools.NewServer(&agenttools.Deps{
-		Client:     h.apiClient,
-		Caller:     sessionCaller,
-		Emitter:    emitter,
-		Model:      model,
-		WorkingDir: workingDir,
+		Client:      h.apiClient,
+		Caller:      sessionCaller,
+		Emitter:     emitter,
+		Model:       model,
+		WorkingDir:  workingDir,
+		TeamManager: h.teamManager,
 	})
 	agentMC, err := client.NewInProcessClient(agentSrv)
 	if err == nil {
@@ -618,6 +624,8 @@ func (h *Handler) buildSessionCaller(workingDir string, store *db.SessionDB, emi
 		{"skill", skill.NewServer(workingDir)},
 		{"ask", ask.NewServer(questionGate)},
 		{"plan", plan.NewServer(planState, emitter)},
+		{"team", teamtools.NewServer(&teamtools.Deps{Manager: h.teamManager, Emitter: emitter})},
+		{"worktree", worktree.NewServer(&worktree.Deps{WorkingDir: workingDir, Store: store})},
 	}
 
 	for _, s := range servers {
@@ -652,6 +660,121 @@ func (h *Handler) buildSessionCaller(workingDir string, store *db.SessionDB, emi
 	}
 
 	return caller, clients
+}
+
+// UpdateSessionRequest is the request body for patching a session.
+type UpdateSessionRequest struct {
+	Model          string `json:"model,omitempty"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+}
+
+// UpdateSession patches session metadata (model, permission_mode).
+func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req UpdateSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	store, err := db.Open(h.dataDir, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+		return
+	}
+	defer store.Close()
+
+	if req.Model != "" {
+		store.SetMeta("model", req.Model)
+	}
+	if req.PermissionMode != "" {
+		if !isValidPermissionMode(req.PermissionMode) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid permission_mode: %s", req.PermissionMode))
+			return
+		}
+		store.SetMeta("permission_mode", req.PermissionMode)
+	}
+
+	store.SetMeta("updated_at", time.Now().Format(time.RFC3339))
+
+	writeJSON(w, http.StatusOK, map[string]string{"updated": id})
+}
+
+// ListTasks returns all tasks in a session.
+func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	store, err := db.Open(h.dataDir, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+		return
+	}
+	defer store.Close()
+
+	tasks, err := store.ListTasks()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("listing tasks: %v", err))
+		return
+	}
+	if tasks == nil {
+		tasks = []*db.Task{}
+	}
+
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+// CompactSessionRequest is the request body for compacting a session.
+type CompactSessionRequest struct {
+	KeepMessages int `json:"keep_messages"` // number of recent messages to keep (default 10)
+}
+
+// CompactSession removes older messages from a session to reduce context.
+func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req CompactSessionRequest
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.KeepMessages <= 0 {
+		req.KeepMessages = 10
+	}
+
+	store, err := db.Open(h.dataDir, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+		return
+	}
+	defer store.Close()
+
+	messages, err := store.ListMessages()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("listing messages: %v", err))
+		return
+	}
+
+	if len(messages) <= req.KeepMessages {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"compacted":        false,
+			"message_count":    len(messages),
+			"removed_messages": 0,
+		})
+		return
+	}
+
+	// Delete older messages, keep the most recent N
+	toRemove := messages[:len(messages)-req.KeepMessages]
+	removed := 0
+	for _, msg := range toRemove {
+		if err := store.DeleteMessage(msg.ID); err == nil {
+			removed++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"compacted":        true,
+		"message_count":    len(messages) - removed,
+		"removed_messages": removed,
+	})
 }
 
 func isValidPermissionMode(mode string) bool {

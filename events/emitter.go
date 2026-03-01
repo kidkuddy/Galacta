@@ -137,3 +137,27 @@ func (e *Emitter) EmitPlanModeChanged(active bool) {
 		Active: active,
 	})
 }
+
+func (e *Emitter) EmitTeamCreated(teamName string) {
+	e.Emit(&TeamCreated{
+		Event:    Event{Type: "team_created", SessionID: e.sessionID},
+		TeamName: teamName,
+	})
+}
+
+func (e *Emitter) EmitTeamDeleted(teamName string) {
+	e.Emit(&TeamDeleted{
+		Event:    Event{Type: "team_deleted", SessionID: e.sessionID},
+		TeamName: teamName,
+	})
+}
+
+func (e *Emitter) EmitTeamMessage(from, recipient, summary, msgType string) {
+	e.Emit(&TeamMessageEvent{
+		Event:     Event{Type: "team_message", SessionID: e.sessionID},
+		From:      from,
+		Recipient: recipient,
+		Summary:   summary,
+		MsgType:   msgType,
+	})
+}

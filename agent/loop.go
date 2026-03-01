@@ -13,6 +13,7 @@ import (
 	"github.com/kidkuddy/galacta/db"
 	"github.com/kidkuddy/galacta/events"
 	"github.com/kidkuddy/galacta/permissions"
+	"github.com/kidkuddy/galacta/team"
 	"github.com/kidkuddy/galacta/toolcaller"
 	"github.com/kidkuddy/galacta/tools/plan"
 	"github.com/google/uuid"
@@ -35,6 +36,7 @@ type AgentLoop struct {
 	thinking      *anthropic.ThinkingConfig
 	serverTools   []anthropic.ServerTool
 	planState     *plan.PlanState
+	inboxCh       <-chan team.TeamMessage
 }
 
 // AgentLoopOptions holds optional configuration for AgentLoop.
@@ -44,6 +46,7 @@ type AgentLoopOptions struct {
 	Thinking      *anthropic.ThinkingConfig
 	ServerTools   []anthropic.ServerTool
 	PlanState     *plan.PlanState
+	InboxCh       <-chan team.TeamMessage
 }
 
 // NewAgentLoop creates a new agent loop.
@@ -73,6 +76,7 @@ func NewAgentLoop(
 		l.thinking = opts.Thinking
 		l.serverTools = opts.ServerTools
 		l.planState = opts.PlanState
+		l.inboxCh = opts.InboxCh
 	}
 	return l
 }
@@ -142,6 +146,20 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 			l.emitter.EmitTurnComplete("aborted")
 			return history, lastText, ctx.Err()
 		default:
+		}
+
+		// Drain inbox messages from team bus (non-blocking)
+		if l.inboxCh != nil {
+			for {
+				select {
+				case msg := <-l.inboxCh:
+					injected := fmt.Sprintf("[Message from %s]: %s", msg.From, msg.Content)
+					history = append(history, anthropic.NewUserMessage(injected))
+				default:
+					goto doneInbox
+				}
+			}
+		doneInbox:
 		}
 
 		// Filter tools if plan mode is active

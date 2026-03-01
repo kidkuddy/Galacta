@@ -87,3 +87,21 @@ type PlanModeChanged struct {
 	Event
 	Active bool `json:"active"`
 }
+
+type TeamCreated struct {
+	Event
+	TeamName string `json:"team_name"`
+}
+
+type TeamDeleted struct {
+	Event
+	TeamName string `json:"team_name"`
+}
+
+type TeamMessageEvent struct {
+	Event
+	From      string `json:"from"`
+	Recipient string `json:"recipient,omitempty"`
+	Summary   string `json:"summary"`
+	MsgType   string `json:"msg_type"`
+}

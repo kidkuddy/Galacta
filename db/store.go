@@ -21,6 +21,37 @@ type SessionDB struct {
 	path string
 }
 
+// OpenPath opens (or creates) a SQLite database at an arbitrary path.
+// Runs migrations automatically.
+func OpenPath(dbPath string) (*SessionDB, error) {
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating db dir: %w", err)
+	}
+
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)", dbPath)
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("pinging database: %w", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("running migrations: %w", err)
+	}
+
+	return &SessionDB{db: db, path: dbPath}, nil
+}
+
 // Open opens (or creates) a per-session SQLite database at {dataDir}/sessions/{sessionID}.db.
 // Runs migrations automatically.
 func Open(dataDir, sessionID string) (*SessionDB, error) {
@@ -126,6 +157,15 @@ func (s *SessionDB) GetMeta(key string) (string, error) {
 		return "", fmt.Errorf("querying metadata: %w", err)
 	}
 	return value, nil
+}
+
+// DeleteMessage removes a message by ID.
+func (s *SessionDB) DeleteMessage(id string) error {
+	_, err := s.db.Exec("DELETE FROM messages WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("deleting message: %w", err)
+	}
+	return nil
 }
 
 // Close closes the database connection.

@@ -32,6 +32,9 @@ func NewServer(h *Handler, port int) *Server {
 	r.Post("/sessions/{id}/permission/{requestID}", h.RespondPermission)
 	r.Post("/sessions/{id}/question/{requestID}", h.RespondQuestion)
 	r.Get("/sessions/{id}/messages", h.ListMessages)
+	r.Patch("/sessions/{id}", h.UpdateSession)
+	r.Get("/sessions/{id}/tasks", h.ListTasks)
+	r.Post("/sessions/{id}/compact", h.CompactSession)
 
 	return &Server{router: r, handler: h, port: port}
 }

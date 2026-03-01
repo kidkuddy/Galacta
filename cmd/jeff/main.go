@@ -324,6 +324,27 @@ func interactiveLoop(base, session, outputFormat string) {
 		case line == "/clear":
 			fmt.Print("\033[2J\033[H")
 			continue
+		case line == "/cost" || line == "/usage":
+			printUsageInfo(base, session)
+			continue
+		case line == "/tasks":
+			printTasks(base, session)
+			continue
+		case line == "/permissions" || strings.HasPrefix(line, "/permissions "):
+			handlePermissions(base, session, line)
+			continue
+		case line == "/model" || strings.HasPrefix(line, "/model "):
+			handleModel(base, session, line)
+			continue
+		case line == "/plan":
+			fmt.Fprintf(os.Stderr, "%sSend a message asking to enter plan mode, or use the galacta_enter_plan_mode tool.%s\n", colorDim, colorReset)
+			continue
+		case line == "/compact" || strings.HasPrefix(line, "/compact "):
+			handleCompact(base, session, line)
+			continue
+		case line == "/help":
+			printHelp()
+			continue
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintf(os.Stderr, "%sunknown command: %s%s\n", colorDim, line, colorReset)
 			continue
@@ -524,6 +545,24 @@ func handleSSEEvent(data string, base string, session string) {
 			fmt.Fprintf(os.Stderr, "%s[plan mode: on]%s\n", colorYellow, colorReset)
 		} else {
 			fmt.Fprintf(os.Stderr, "%s[plan mode: off]%s\n", colorYellow, colorReset)
+		}
+
+	case "team_created":
+		teamName, _ := event["team_name"].(string)
+		fmt.Fprintf(os.Stderr, "%s[team: %s created]%s\n", colorCyan, teamName, colorReset)
+
+	case "team_deleted":
+		teamName, _ := event["team_name"].(string)
+		fmt.Fprintf(os.Stderr, "%s[team: %s deleted]%s\n", colorDim, teamName, colorReset)
+
+	case "team_message":
+		from, _ := event["from"].(string)
+		recipient, _ := event["recipient"].(string)
+		summary, _ := event["summary"].(string)
+		if recipient != "" {
+			fmt.Fprintf(os.Stderr, "%s[%s → %s] %s%s\n", colorCyan, from, recipient, summary, colorReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s[%s → all] %s%s\n", colorCyan, from, summary, colorReset)
 		}
 
 	case "error":
@@ -792,6 +831,204 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+func printUsageInfo(base, session string) {
+	resp, err := getJSON(base + "/sessions/" + session)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	data, ok := resp["data"].(map[string]any)
+	if !ok {
+		return
+	}
+	model, _ := data["model"].(string)
+	fmt.Fprintf(os.Stderr, "  Model: %s\n", model)
+	if usage, ok := data["usage"].(map[string]any); ok {
+		inTok, _ := usage["TotalInputTokens"].(float64)
+		outTok, _ := usage["TotalOutputTokens"].(float64)
+		cacheRead, _ := usage["TotalCacheReadTokens"].(float64)
+		cacheWrite, _ := usage["TotalCacheWriteTokens"].(float64)
+		msgs, _ := usage["MessageCount"].(float64)
+		fmt.Fprintf(os.Stderr, "  Input tokens:       %d\n", int(inTok))
+		fmt.Fprintf(os.Stderr, "  Output tokens:      %d\n", int(outTok))
+		fmt.Fprintf(os.Stderr, "  Cache read tokens:  %d\n", int(cacheRead))
+		fmt.Fprintf(os.Stderr, "  Cache write tokens: %d\n", int(cacheWrite))
+		fmt.Fprintf(os.Stderr, "  Messages:           %d\n", int(msgs))
+
+		// Estimate cost using known pricing
+		var costUSD float64
+		switch {
+		case strings.Contains(model, "opus"):
+			costUSD = (inTok/1_000_000)*15.0 + (outTok/1_000_000)*75.0
+		case strings.Contains(model, "sonnet"):
+			costUSD = (inTok/1_000_000)*3.0 + (outTok/1_000_000)*15.0
+		case strings.Contains(model, "haiku"):
+			costUSD = (inTok/1_000_000)*0.80 + (outTok/1_000_000)*4.0
+		}
+		if costUSD > 0 {
+			fmt.Fprintf(os.Stderr, "  Estimated cost:     $%.4f\n", costUSD)
+		}
+	}
+}
+
+func printTasks(base, session string) {
+	resp, err := getJSON(base + "/sessions/" + session + "/tasks")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	data, ok := resp["data"].([]any)
+	if !ok || len(data) == 0 {
+		fmt.Fprintf(os.Stderr, "%sNo tasks.%s\n", colorDim, colorReset)
+		return
+	}
+	for _, item := range data {
+		t, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := t["id"].(float64)
+		subject, _ := t["subject"].(string)
+		status, _ := t["status"].(string)
+		owner, _ := t["owner"].(string)
+
+		statusColor := colorDim
+		switch status {
+		case "in_progress":
+			statusColor = colorYellow
+		case "completed":
+			statusColor = colorGreen
+		}
+		ownerStr := ""
+		if owner != "" {
+			ownerStr = fmt.Sprintf(" (%s)", owner)
+		}
+		fmt.Fprintf(os.Stderr, "  %d. %s%-11s%s %s%s\n", int(id), statusColor, status, colorReset, subject, ownerStr)
+	}
+}
+
+func handlePermissions(base, session, line string) {
+	parts := strings.Fields(line)
+	if len(parts) == 1 {
+		// Show current
+		resp, err := getJSON(base + "/sessions/" + session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		data, ok := resp["data"].(map[string]any)
+		if !ok {
+			return
+		}
+		mode, _ := data["permission_mode"].(string)
+		fmt.Fprintf(os.Stderr, "  Permission mode: %s\n", mode)
+		fmt.Fprintf(os.Stderr, "%s  Available: default, acceptEdits, bypassPermissions, plan, dontAsk%s\n", colorDim, colorReset)
+		return
+	}
+	// Set new mode
+	newMode := parts[1]
+	_, err := patchJSON(base+"/sessions/"+session, map[string]string{"permission_mode": newMode})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  Permission mode set to: %s\n", newMode)
+}
+
+func handleModel(base, session, line string) {
+	parts := strings.Fields(line)
+	if len(parts) == 1 {
+		// Show current
+		resp, err := getJSON(base + "/sessions/" + session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		data, ok := resp["data"].(map[string]any)
+		if !ok {
+			return
+		}
+		model, _ := data["model"].(string)
+		fmt.Fprintf(os.Stderr, "  Model: %s\n", model)
+		return
+	}
+	// Set new model
+	newModel := parts[1]
+	_, err := patchJSON(base+"/sessions/"+session, map[string]string{"model": newModel})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  Model set to: %s\n", newModel)
+}
+
+func handleCompact(base, session, line string) {
+	keep := 10
+	parts := strings.Fields(line)
+	if len(parts) > 1 {
+		fmt.Sscanf(parts[1], "%d", &keep)
+	}
+
+	body := map[string]int{"keep_messages": keep}
+	resp, err := postJSON(base+"/sessions/"+session+"/compact", body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	data, ok := resp["data"].(map[string]any)
+	if !ok {
+		return
+	}
+	compacted, _ := data["compacted"].(bool)
+	remaining, _ := data["message_count"].(float64)
+	removed, _ := data["removed_messages"].(float64)
+	if compacted {
+		fmt.Fprintf(os.Stderr, "  Compacted: removed %d messages, %d remaining\n", int(removed), int(remaining))
+	} else {
+		fmt.Fprintf(os.Stderr, "  Nothing to compact (%d messages)\n", int(remaining))
+	}
+}
+
+func printHelp() {
+	fmt.Fprintf(os.Stderr, `%sAvailable commands:%s
+  /help          Show this help
+  /quit, /exit   End the session
+  /history       Show conversation history
+  /session       Show session info
+  /cost, /usage  Show token usage and cost
+  /model [name]  Show or change model
+  /permissions [mode]  Show or change permission mode
+  /tasks         List tasks
+  /plan          Plan mode info
+  /compact [N]   Compact conversation (keep last N messages, default 10)
+  /clear         Clear screen
+`, colorBold, colorReset)
+}
+
+func patchJSON(url string, body any) (map[string]any, error) {
+	data, _ := json.Marshal(body)
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if resp.StatusCode >= 400 {
+		errMsg, _ := result["error"].(string)
+		return result, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errMsg)
+	}
+	return result, nil
 }
 
 func truncate(s string, max int) string {
