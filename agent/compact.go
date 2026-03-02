@@ -112,9 +112,13 @@ func (l *AgentLoop) compactConversation(ctx context.Context, history []anthropic
 
 	l.emitter.EmitTextDelta("\n[Compacting conversation...]\n")
 
+	// Strip server tool blocks (e.g. server_tool_use, web_search_tool_result)
+	// to avoid API validation errors from orphaned server tool blocks.
+	cleanedHistory := stripServerToolBlocks(history)
+
 	// Build the compact request with conversation as context
-	compactMessages := make([]anthropic.Message, 0, len(history)+1)
-	compactMessages = append(compactMessages, history...)
+	compactMessages := make([]anthropic.Message, 0, len(cleanedHistory)+1)
+	compactMessages = append(compactMessages, cleanedHistory...)
 	compactMessages = append(compactMessages, anthropic.NewUserMessage(CompactUserPrompt))
 
 	resp, err := l.client.SendMessage(ctx, anthropic.MessageRequest{

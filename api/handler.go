@@ -31,7 +31,6 @@ import (
 	"github.com/kidkuddy/galacta/tools/skill"
 	"github.com/kidkuddy/galacta/tools/task"
 	teamtools "github.com/kidkuddy/galacta/tools/team"
-	"github.com/kidkuddy/galacta/tools/web"
 	"github.com/kidkuddy/galacta/tools/worktree"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -391,10 +390,7 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	// Build agent loop options
 	loopOpts := &agent.AgentLoopOptions{
 		FallbackModel: fallbackModel,
-		ServerTools: []anthropic.ServerTool{
-			{Type: "web_search_20250305", Name: "web_search", MaxUses: 5},
-		},
-		PlanState: planState,
+		PlanState:     planState,
 	}
 	if maxBudgetStr != "" {
 		fmt.Sscanf(maxBudgetStr, "%f", &loopOpts.MaxBudgetUSD)
@@ -580,7 +576,14 @@ func (h *Handler) ListMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // sessionInfo loads session info from its DB file.
+// Returns nil if the session DB does not exist on disk.
 func (h *Handler) sessionInfo(sessionID string) map[string]interface{} {
+	// Check if the DB file exists before opening (db.Open creates the file).
+	dbPath := filepath.Join(h.dataDir, "sessions", sessionID+".db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return nil
+	}
+
 	store, err := db.Open(h.dataDir, sessionID)
 	if err != nil {
 		return nil
@@ -656,7 +659,6 @@ func (h *Handler) buildSessionCaller(workingDir string, store *db.SessionDB, emi
 	}{
 		{"fs", fs.NewServer(workingDir)},
 		{"exec", exectools.NewServer(workingDir)},
-		{"web", web.NewServer()},
 		{"task", task.NewServer(store)},
 		{"skill", skill.NewServer(workingDir)},
 		{"ask", ask.NewServer(questionGate)},
@@ -797,23 +799,34 @@ func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 
 	if len(messages) <= 2 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"compacted":     false,
-			"message_count": len(messages),
+			"compacted":          false,
+			"pre_message_count":  len(messages),
+			"post_message_count": len(messages),
 		})
 		return
 	}
 
-	// Reconstruct conversation history
+	// Reconstruct conversation history, stripping server tool blocks
+	// (e.g. server_tool_use, web_search_tool_result) that cause API validation errors.
 	var history []anthropic.Message
 	for _, row := range messages {
 		var content []anthropic.ContentBlock
 		if err := json.Unmarshal([]byte(row.Content), &content); err != nil {
 			continue
 		}
-		history = append(history, anthropic.Message{
-			Role:    row.Role,
-			Content: content,
-		})
+		var filtered []anthropic.ContentBlock
+		for _, b := range content {
+			if b.Type == "server_tool_use" || b.Type == "web_search_tool_result" {
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		if len(filtered) > 0 {
+			history = append(history, anthropic.Message{
+				Role:    row.Role,
+				Content: filtered,
+			})
+		}
 	}
 
 	// Build compact request

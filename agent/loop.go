@@ -190,8 +190,12 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 				assistantMsg, usage, stopReason, err = l.streamTurn(ctx, sessionID, req)
 			}
 			if err != nil {
-				l.emitter.EmitError(err.Error())
-				l.emitter.EmitTurnComplete("error")
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					l.emitter.EmitTurnComplete("aborted")
+				} else {
+					l.emitter.EmitError(err.Error())
+					l.emitter.EmitTurnComplete("error")
+				}
 				return history, lastText, fmt.Errorf("streaming turn %d: %w", turn, err)
 			}
 		}
@@ -284,8 +288,12 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 		// Check permissions and execute tool calls
 		toolResults, err := l.executeTools(ctx, sessionID, toolUses)
 		if err != nil {
-			l.emitter.EmitError(err.Error())
-			l.emitter.EmitTurnComplete("error")
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				l.emitter.EmitTurnComplete("aborted")
+			} else {
+				l.emitter.EmitError(err.Error())
+				l.emitter.EmitTurnComplete("error")
+			}
 			return history, lastText, fmt.Errorf("executing tools on turn %d: %w", turn, err)
 		}
 
@@ -326,7 +334,7 @@ func (l *AgentLoop) streamTurn(ctx context.Context, sessionID string, req anthro
 	eventsCh, errCh := l.client.Stream(ctx, req)
 
 	var (
-		contentBlocks []anthropic.ContentBlock
+		contentBlocks = make([]anthropic.ContentBlock, 0) // never nil — avoids "null" in JSON
 		currentBlock  *anthropic.ContentBlock
 		usage         anthropic.Usage
 		stopReason    string
@@ -507,6 +515,12 @@ func (l *AgentLoop) loadHistory() ([]anthropic.Message, error) {
 			log.Printf("galacta: skipping message %s: invalid content JSON: %v", row.ID, err)
 			continue
 		}
+		// Skip messages with nil/empty content (e.g. assistant with no output).
+		// These cause API errors ("content: Input should be a valid list").
+		if len(content) == 0 {
+			log.Printf("galacta: skipping message %s: empty content", row.ID)
+			continue
+		}
 		indexed = append(indexed, indexedMessage{
 			msg: anthropic.Message{
 				Role:    row.Role,
@@ -537,7 +551,10 @@ func (l *AgentLoop) loadHistory() ([]anthropic.Message, error) {
 	return messages, nil
 }
 
-// hasToolUse returns true if any content block is a tool_use block.
+// hasToolUse returns true if any content block is a regular tool_use block.
+// Only checks for "tool_use" (not "server_tool_use") because server tool blocks
+// are self-contained — the API handles their execution inline, so they never
+// produce orphaned tool_use that requires a following tool_result.
 func hasToolUse(blocks []anthropic.ContentBlock) bool {
 	for _, b := range blocks {
 		if b.Type == "tool_use" {
@@ -545,4 +562,27 @@ func hasToolUse(blocks []anthropic.ContentBlock) bool {
 		}
 	}
 	return false
+}
+
+// stripServerToolBlocks removes server_tool_use and web_search_tool_result blocks
+// from messages. These are API-generated blocks that can cause validation errors
+// when re-sent (e.g. orphaned server_tool_use without matching result).
+func stripServerToolBlocks(messages []anthropic.Message) []anthropic.Message {
+	var cleaned []anthropic.Message
+	for _, msg := range messages {
+		var blocks []anthropic.ContentBlock
+		for _, b := range msg.Content {
+			if b.Type == "server_tool_use" || b.Type == "web_search_tool_result" {
+				continue
+			}
+			blocks = append(blocks, b)
+		}
+		if len(blocks) > 0 {
+			cleaned = append(cleaned, anthropic.Message{
+				Role:    msg.Role,
+				Content: blocks,
+			})
+		}
+	}
+	return cleaned
 }
