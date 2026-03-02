@@ -461,10 +461,27 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 		done <- loop.Run(ctx, id, req.Message)
 	}()
 
-	// Stream events to the HTTP response
-	for data := range emitter.Channel() {
-		fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
-		flusher.Flush()
+	// Stream events to the HTTP response.
+	// Also watch r.Context() so a client disconnect (tab close) cancels the session
+	// rather than leaving it stuck in h.active forever.
+	clientGone := r.Context().Done()
+streamLoop:
+	for {
+		select {
+		case data, ok := <-emitter.Channel():
+			if !ok {
+				break streamLoop
+			}
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
+			flusher.Flush()
+		case <-clientGone:
+			cancel()
+			// Drain remaining buffered events so the agent goroutine isn't blocked
+			// trying to emit into a full channel, then wait for it to exit.
+			for range emitter.Channel() {
+			}
+			break streamLoop
+		}
 	}
 
 	// Final done event
