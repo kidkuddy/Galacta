@@ -122,7 +122,8 @@ func (s *SessionDB) ListMessages() ([]MessageRow, error) {
 	return messages, rows.Err()
 }
 
-// GetUsageTotals returns summed token counts across all messages.
+// GetUsageTotals returns summed token counts across all messages, including
+// tokens accumulated from previous compactions/clears stored in metadata.
 func (s *SessionDB) GetUsageTotals() (*UsageTotals, error) {
 	var u UsageTotals
 	err := s.db.QueryRow(
@@ -134,7 +135,63 @@ func (s *SessionDB) GetUsageTotals() (*UsageTotals, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying usage totals: %w", err)
 	}
+
+	// Add lifetime accumulated tokens from previous compactions/clears.
+	lifeIn, _ := s.getMetaInt("lifetime_input_tokens")
+	lifeOut, _ := s.getMetaInt("lifetime_output_tokens")
+	lifeCacheRead, _ := s.getMetaInt("lifetime_cache_read_tokens")
+	lifeCacheWrite, _ := s.getMetaInt("lifetime_cache_write_tokens")
+	u.TotalInputTokens += lifeIn
+	u.TotalOutputTokens += lifeOut
+	u.TotalCacheReadTokens += lifeCacheRead
+	u.TotalCacheWriteTokens += lifeCacheWrite
+
 	return &u, nil
+}
+
+// AccumulateUsage reads current message token sums and adds them to the
+// lifetime counters stored in metadata. Call this before wiping messages
+// (compact or clear) so the totals survive across context resets.
+func (s *SessionDB) AccumulateUsage() error {
+	var in, out, cacheRead, cacheWrite int
+	err := s.db.QueryRow(
+		`SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0)
+		 FROM messages`,
+	).Scan(&in, &out, &cacheRead, &cacheWrite)
+	if err != nil {
+		return fmt.Errorf("querying message totals for accumulation: %w", err)
+	}
+
+	lifeIn, _ := s.getMetaInt("lifetime_input_tokens")
+	lifeOut, _ := s.getMetaInt("lifetime_output_tokens")
+	lifeCacheRead, _ := s.getMetaInt("lifetime_cache_read_tokens")
+	lifeCacheWrite, _ := s.getMetaInt("lifetime_cache_write_tokens")
+
+	if err := s.SetMeta("lifetime_input_tokens", fmt.Sprintf("%d", lifeIn+in)); err != nil {
+		return err
+	}
+	if err := s.SetMeta("lifetime_output_tokens", fmt.Sprintf("%d", lifeOut+out)); err != nil {
+		return err
+	}
+	if err := s.SetMeta("lifetime_cache_read_tokens", fmt.Sprintf("%d", lifeCacheRead+cacheRead)); err != nil {
+		return err
+	}
+	if err := s.SetMeta("lifetime_cache_write_tokens", fmt.Sprintf("%d", lifeCacheWrite+cacheWrite)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// getMetaInt reads a metadata key as an integer, returning 0 if missing or unparseable.
+func (s *SessionDB) getMetaInt(key string) (int, error) {
+	val, err := s.GetMeta(key)
+	if err != nil {
+		return 0, nil
+	}
+	var n int
+	fmt.Sscanf(val, "%d", &n)
+	return n, nil
 }
 
 // SetMeta stores a key-value pair in the metadata table (upsert).

@@ -158,6 +158,10 @@ Please continue the conversation from where we left off without asking the user 
 
 	// Persist: delete all old messages, save the summary as a new user message
 	if l.store != nil {
+		// Accumulate token counts into lifetime metadata before wiping messages.
+		if err := l.store.AccumulateUsage(); err != nil {
+			log.Printf("galacta: failed to accumulate usage before compact: %v", err)
+		}
 		rows, err := l.store.ListMessages()
 		if err == nil {
 			for _, row := range rows {

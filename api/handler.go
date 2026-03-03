@@ -888,6 +888,11 @@ func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 	// Replace all messages with the summary
 	continuationText := fmt.Sprintf("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n%s\n\nPlease continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.", summary)
 
+	// Accumulate token counts into lifetime metadata before wiping messages.
+	if err := store.AccumulateUsage(); err != nil {
+		log.Printf("galacta: failed to accumulate usage before compact: %v", err)
+	}
+
 	preCount := len(messages)
 	for _, row := range messages {
 		store.DeleteMessage(row.ID)
@@ -911,6 +916,39 @@ func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 			"input_tokens":  resp.Usage.InputTokens,
 			"output_tokens": resp.Usage.OutputTokens,
 		},
+	})
+}
+
+// ClearSession wipes all messages from a session without summarization.
+// Unlike compact, no API call is made — it just accumulates token totals and deletes.
+func (h *Handler) ClearSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	store, err := db.Open(h.dataDir, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+		return
+	}
+	defer store.Close()
+
+	messages, err := store.ListMessages()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("listing messages: %v", err))
+		return
+	}
+
+	// Accumulate token counts before wiping.
+	if err := store.AccumulateUsage(); err != nil {
+		log.Printf("galacta: failed to accumulate usage before clear: %v", err)
+	}
+
+	for _, row := range messages {
+		store.DeleteMessage(row.ID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cleared":           true,
+		"deleted_messages":  len(messages),
 	})
 }
 
