@@ -26,35 +26,68 @@ const (
 	CompactSystemPrompt = "You are a helpful AI assistant tasked with summarizing conversations."
 
 	// CompactUserPrompt is the user prompt used to request conversation summarization.
-	CompactUserPrompt = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+	CompactUserPrompt = `Your task is to produce a detailed summary of the conversation so far. Pay close
+attention to explicit user requests and the actions you took in response.
 
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+The summary must capture technical details, code patterns, and architectural decisions
+thoroughly enough that development work can continue without context loss.
 
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-   - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+Before writing your final summary, use <analysis> tags to structure your reasoning
+and verify completeness. During analysis:
+1. Walk through each message chronologically. For each segment, identify:
+   - The user's explicit requests and underlying intent
+   - How you addressed those requests
+   - Key decisions, technical concepts, and code patterns
+   - Concrete details:
+     - Complete code snippets
+     - Function signatures
+   - Errors encountered and how they were resolved
+   - Specific user feedback, especially corrections or redirections
+2. Verify technical accuracy and completeness against each required section below.
 
-Your summary should include the following sections:
+Structure your summary with these sections:
+1. Primary Request and Intent: All explicit user requests and their underlying goals, in detail
+2. Key Technical Concepts: All significant technologies, frameworks, and concepts discussed
+3. Files and Code Sections: Every file examined, modified, or created — with full code snippets where relevant and a note on why each file matters
+4. Errors and Fixes: Every error encountered, how it was resolved, and any user feedback on the resolution
+5. Problem Solving: Problems solved and any ongoing troubleshooting
+6. All User Messages: Every non-tool-result user message — these are critical for tracking feedback and shifting intent
+7. Pending Tasks: Any tasks explicitly assigned but not yet completed
+8. Current Work: Precisely what was being worked on immediately before this summary — file names, code snippets, and context from the most recent messages
+9. Optional Next Step: The immediate next action, but ONLY if it directly continues the user's most recent explicit request. If the last task was finished, only list next steps that are explicitly aligned with user requests. If a next step exists, include verbatim quotes from the most recent messages showing exactly what was being worked on and where it left off — prevent any drift in task interpretation.
 
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
-7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
-9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirmation from the user.
+IMPORTANT: Do NOT use any tools. You MUST respond with ONLY the <summary>...</summary> block as your text output.`
+
+	// CompactRecentOnlyPrompt is the user prompt for compacting conversations that
+	// already have prior retained context (summarizes only the recent portion).
+	CompactRecentOnlyPrompt = `Your task is to summarize ONLY the recent portion of the conversation — the messages
+following the earlier retained context. The earlier messages are preserved and do NOT
+need summarizing. Focus exclusively on what was discussed, learned, and accomplished
+in the recent messages.
+
+Before writing your final summary, use <analysis> tags to structure your reasoning.
+During analysis:
+1. Walk through the recent messages chronologically. For each segment, identify:
+   - The user's explicit requests and intent
+   - How you addressed those requests
+   - Key decisions, technical concepts, and code patterns
+   - Concrete details: full code snippets, function signatures
+   - Errors encountered and resolutions
+   - Specific user feedback, especially corrections
+2. Verify technical accuracy and completeness.
+
+Structure your summary with these sections:
+1. Primary Request and Intent: User requests and intent from the recent messages
+2. Key Technical Concepts: Technologies, frameworks, and concepts discussed recently
+3. Files and Code Sections: Files examined, modified, or created — with code snippets and notes on importance
+4. Errors and Fixes: Errors encountered and their resolutions
+5. Problem Solving: Problems solved and ongoing troubleshooting
+6. All User Messages: Every non-tool-result user message from the recent portion
+7. Pending Tasks: Tasks from recent messages still outstanding
+8. Current Work: What was being worked on immediately before this summary
+9. Optional Next Step: Immediate next action from the most recent work, with verbatim quotes from recent conversation
+
+Summarize ONLY the recent messages (after retained context). Be precise and thorough.
 
 IMPORTANT: Do NOT use any tools. You MUST respond with ONLY the <summary>...</summary> block as your text output.`
 )
@@ -123,7 +156,7 @@ func (l *AgentLoop) compactConversation(ctx context.Context, history []anthropic
 
 	resp, err := l.client.SendMessage(ctx, anthropic.MessageRequest{
 		Model:    l.model,
-		System:   CompactSystemPrompt,
+		System:   []anthropic.SystemBlock{anthropic.NewSystemBlock(CompactSystemPrompt)},
 		Messages: compactMessages,
 	})
 	if err != nil {
@@ -145,11 +178,11 @@ func (l *AgentLoop) compactConversation(ctx context.Context, history []anthropic
 	}
 
 	// Build the continuation message (same format as Claude Code's XcT)
-	continuationText := fmt.Sprintf(`This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+	continuationText := fmt.Sprintf(`This session continues from a previous conversation that exhausted its context. The summary below covers the earlier portion.
 
 %s
 
-Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.`, summary)
+Continue from where you left off without asking the user further questions. Resume the last task you were working on.`, summary)
 
 	// Replace history with single summary message
 	compacted := []anthropic.Message{

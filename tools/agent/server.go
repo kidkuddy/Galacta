@@ -176,7 +176,7 @@ func NewServer(deps *Deps) *server.MCPServer {
 			deps.Emitter,
 			nil, // no store — sub-agents don't persist
 			model,
-			fmt.Sprintf("You are a sub-agent of type %q. Complete the task described in the user message.", agentType),
+			[]anthropic.SystemBlock{anthropic.NewSystemBlock(GetSubAgentPrompt(agentType))},
 			loopOpts,
 		)
 

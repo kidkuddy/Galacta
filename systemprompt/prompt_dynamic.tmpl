@@ -1,0 +1,42 @@
+# Environment
+{{ if .Env.WorkingDir }}
+- Working directory: {{ .Env.WorkingDir }}
+{{ end -}}
+{{ if .Env.IsGitRepo }}
+- Git repository: yes
+{{ end -}}
+- Platform: {{ .Env.Platform }}
+{{ if .Env.Shell }}
+- Shell: {{ .Env.Shell }}
+{{ end -}}
+{{ if .Env.OSVersion }}
+- OS Version: {{ .Env.OS }} {{ .Env.OSVersion }}
+{{ end -}}
+{{ if .Env.Model }}
+- Model: {{ .Env.Model }}
+{{ end -}}
+{{ if .Env.IsGitRepo }}
+## Git Status
+
+This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
+{{ if .Env.GitBranch }}
+Current branch: {{ .Env.GitBranch }}
+{{ end -}}
+{{ if .Env.GitStatus }}
+Status:
+{{ .Env.GitStatus }}
+{{ end -}}
+{{ if .Env.GitRecent }}
+Recent commits:
+{{ .Env.GitRecent }}
+{{ end -}}
+{{ end -}}
+{{ if .ClaudeMDFiles }}
+# Project Instructions
+{{ range .ClaudeMDFiles }}
+## {{ .Source }} ({{ .Path }})
+
+{{ .Content }}
+
+{{ end -}}
+{{ end -}}

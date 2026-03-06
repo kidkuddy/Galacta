@@ -6,30 +6,51 @@ import (
 	"text/template"
 )
 
-//go:embed prompt.tmpl
-var promptFS embed.FS
+//go:embed prompt_static.tmpl
+var staticFS embed.FS
 
-// templateData holds all data passed to the system prompt template.
+//go:embed prompt_dynamic.tmpl
+var dynamicFS embed.FS
+
+// templateData holds all data passed to the system prompt templates.
 type templateData struct {
-	Env          EnvContext
+	Env           EnvContext
 	ClaudeMDFiles []ClaudeMDFile
-	ToolNames    []string
+	ToolNames     []string
 }
 
-var promptTemplate *template.Template
+var (
+	staticTemplate  *template.Template
+	dynamicTemplate *template.Template
+)
 
 func init() {
-	content, err := promptFS.ReadFile("prompt.tmpl")
+	staticContent, err := staticFS.ReadFile("prompt_static.tmpl")
 	if err != nil {
-		panic("systemprompt: failed to read embedded template: " + err.Error())
+		panic("systemprompt: failed to read embedded static template: " + err.Error())
 	}
-	promptTemplate = template.Must(template.New("prompt").Parse(string(content)))
+	staticTemplate = template.Must(template.New("static").Parse(string(staticContent)))
+
+	dynamicContent, err := dynamicFS.ReadFile("prompt_dynamic.tmpl")
+	if err != nil {
+		panic("systemprompt: failed to read embedded dynamic template: " + err.Error())
+	}
+	dynamicTemplate = template.Must(template.New("dynamic").Parse(string(dynamicContent)))
 }
 
-// renderTemplate executes the system prompt template with the given data.
-func renderTemplate(data templateData) (string, error) {
+// renderStaticTemplate executes the static system prompt template.
+func renderStaticTemplate(data templateData) (string, error) {
 	var buf bytes.Buffer
-	if err := promptTemplate.Execute(&buf, data); err != nil {
+	if err := staticTemplate.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// renderDynamicTemplate executes the dynamic system prompt template.
+func renderDynamicTemplate(data templateData) (string, error) {
+	var buf bytes.Buffer
+	if err := dynamicTemplate.Execute(&buf, data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

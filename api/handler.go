@@ -30,6 +30,7 @@ import (
 	"github.com/kidkuddy/galacta/tools/plan"
 	"github.com/kidkuddy/galacta/tools/skill"
 	"github.com/kidkuddy/galacta/tools/task"
+	"github.com/kidkuddy/galacta/tools/todo"
 	teamtools "github.com/kidkuddy/galacta/tools/team"
 	"github.com/kidkuddy/galacta/tools/worktree"
 	"github.com/mark3labs/mcp-go/client"
@@ -375,16 +376,26 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 		toolNames[i] = t.Name
 	}
 
+	// Build memory block for this project
+	memoryDir := systemprompt.MemoryDirForProject(workingDir)
+	memoryBlock := systemprompt.BuildMemoryBlock(systemprompt.MemoryConfig{
+		MemoryDir: memoryDir,
+	})
+
 	// Build system prompt with CLAUDE.md discovery and environment context
 	builtPrompt, err := systemprompt.Build(systemprompt.BuildOptions{
 		WorkingDir:   workingDir,
 		Model:        model,
 		ToolNames:    toolNames,
 		UserOverride: userSystemPrompt,
+		MemoryBlock:  memoryBlock,
 	})
 	if err != nil {
 		log.Printf("galacta: failed to build system prompt: %v", err)
-		builtPrompt = userSystemPrompt // fallback to user-provided prompt
+		// Fallback to user-provided prompt as a single block
+		if userSystemPrompt != "" {
+			builtPrompt = []anthropic.SystemBlock{anthropic.NewSystemBlock(userSystemPrompt)}
+		}
 	}
 
 	// Build agent loop options
@@ -677,6 +688,7 @@ func (h *Handler) buildSessionCaller(workingDir string, store *db.SessionDB, emi
 		{"fs", fs.NewServer(workingDir)},
 		{"exec", exectools.NewServer(workingDir)},
 		{"task", task.NewServer(store)},
+		{"todo", todo.NewServer(store)},
 		{"skill", skill.NewServer(workingDir)},
 		{"ask", ask.NewServer(questionGate)},
 		{"plan", plan.NewServer(planState, emitter)},
@@ -863,7 +875,7 @@ func (h *Handler) CompactSession(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.apiClient.SendMessage(r.Context(), anthropic.MessageRequest{
 		Model:    model,
-		System:   agent.CompactSystemPrompt,
+		System:   []anthropic.SystemBlock{anthropic.NewSystemBlock(agent.CompactSystemPrompt)},
 		Messages: compactMessages,
 	})
 	if err != nil {

@@ -22,16 +22,53 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("api error %d: %s: %s", e.StatusCode, e.Type, e.Message)
 }
 
+// SystemBlock is a single block within the system prompt array.
+// The Anthropic API accepts system as either a string or an array of these blocks.
+// Using the array form enables prompt caching via cache_control markers.
+type SystemBlock struct {
+	Type         string        `json:"type"`                    // always "text"
+	Text         string        `json:"text"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"` // set to enable caching on this block
+}
+
+// CacheControl marks a system block as a cache breakpoint.
+type CacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+// NewSystemBlock creates a plain text system block.
+func NewSystemBlock(text string) SystemBlock {
+	return SystemBlock{Type: "text", Text: text}
+}
+
+// NewCachedSystemBlock creates a text system block with cache_control set.
+func NewCachedSystemBlock(text string) SystemBlock {
+	return SystemBlock{
+		Type:         "text",
+		Text:         text,
+		CacheControl: &CacheControl{Type: "ephemeral"},
+	}
+}
+
 // MessageRequest is the request body for the Anthropic Messages API.
 type MessageRequest struct {
 	Model       string          `json:"model"`
 	MaxTokens   int             `json:"max_tokens"`
-	System      string          `json:"system,omitempty"`
+	System      []SystemBlock   `json:"system,omitempty"`
 	Messages    []Message       `json:"messages"`
 	Tools       []Tool          `json:"tools,omitempty"`
 	ServerTools []ServerTool    `json:"-"` // merged into tools via custom MarshalJSON
 	Stream      bool            `json:"stream"`
 	Thinking    *ThinkingConfig `json:"thinking,omitempty"`
+}
+
+// SetSystemString is a convenience method to set the system prompt as a single string.
+func (r *MessageRequest) SetSystemString(s string) {
+	if s == "" {
+		r.System = nil
+		return
+	}
+	r.System = []SystemBlock{NewSystemBlock(s)}
 }
 
 // Message represents a single message in the conversation.

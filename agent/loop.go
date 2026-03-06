@@ -29,7 +29,7 @@ type AgentLoop struct {
 	emitter       *events.Emitter
 	store         *db.SessionDB
 	model         string
-	systemPrompt  string
+	systemPrompt  []anthropic.SystemBlock
 	maxTurns      int
 	maxBudgetUSD  float64
 	fallbackModel string
@@ -57,7 +57,7 @@ func NewAgentLoop(
 	emitter *events.Emitter,
 	store *db.SessionDB,
 	model string,
-	systemPrompt string,
+	systemPrompt []anthropic.SystemBlock,
 	opts *AgentLoopOptions,
 ) *AgentLoop {
 	l := &AgentLoop{
@@ -168,12 +168,31 @@ func (l *AgentLoop) iterate(ctx context.Context, sessionID string,
 			currentTools = filterReadOnly(tools)
 		}
 
+		// Build per-turn system reminders (injected as user messages, not persisted)
+		messagesToSend := history
+		if persist {
+			reminderBlocks := BuildReminders(ReminderConfig{
+				PlanState: l.planState,
+				TurnCount: turn,
+			})
+			if len(reminderBlocks) > 0 {
+				// Inject reminders as a user message at the end of messages sent to API
+				// These are NOT appended to history — they're ephemeral per-turn context.
+				messagesToSend = make([]anthropic.Message, len(history), len(history)+1)
+				copy(messagesToSend, history)
+				messagesToSend = append(messagesToSend, anthropic.Message{
+					Role:    "user",
+					Content: reminderBlocks,
+				})
+			}
+		}
+
 		// Call Anthropic API
 		currentModel := l.model
 		req := anthropic.MessageRequest{
 			Model:       currentModel,
 			System:      l.systemPrompt,
-			Messages:    history,
+			Messages:    messagesToSend,
 			Tools:       currentTools,
 			ServerTools: l.serverTools,
 			Thinking:    l.thinking,
