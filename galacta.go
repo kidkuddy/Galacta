@@ -2,24 +2,23 @@ package galacta
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 
 	"github.com/kidkuddy/galacta/anthropic"
 	"github.com/kidkuddy/galacta/api"
+	"github.com/kidkuddy/galacta/mcpmanager"
 	"github.com/kidkuddy/galacta/toolcaller"
-	"github.com/mark3labs/mcp-go/client"
 )
 
 // Galacta is the top-level daemon instance.
 type Galacta struct {
-	cfg        *Config
-	apiClient  *anthropic.Client
-	caller     *toolcaller.Caller
-	server     *api.Server
-	extClients []client.MCPClient
+	cfg       *Config
+	apiClient *anthropic.Client
+	caller    *toolcaller.Caller
+	server    *api.Server
+	mcpMgr    *mcpmanager.Manager
 }
 
 // New creates and wires a Galacta instance.
@@ -40,20 +39,19 @@ func New(cfg *Config) (*Galacta, error) {
 	registry := toolcaller.NewRegistry()
 	caller := toolcaller.NewCaller(registry, cfg.MaxConcurrency)
 
-	var extClients []client.MCPClient
+	var mcpMgr *mcpmanager.Manager
 
 	// Connect external MCP servers from config
 	if cfg.MCPConfigPath != "" {
-		clients, err := connectExternalMCP(cfg.MCPConfigPath)
+		mcpMgr = mcpmanager.New()
+		ctx := context.Background()
+		connected, err := mcpMgr.ConnectFromConfig(ctx, cfg.MCPConfigPath)
 		if err != nil {
 			log.Printf("galacta: warning: failed to load MCP config: %v", err)
-		} else {
-			ctx := context.Background()
-			for _, mc := range clients {
-				if err := caller.AddClient(ctx, mc); err != nil {
-					log.Printf("galacta: warning: failed to discover tools from MCP server: %v", err)
-				}
-				extClients = append(extClients, mc)
+		}
+		for _, srv := range connected {
+			if err := caller.AddClient(ctx, srv.Client); err != nil {
+				log.Printf("galacta: warning: failed to discover tools from MCP server %q: %v", srv.Name, err)
 			}
 		}
 	}
@@ -62,11 +60,11 @@ func New(cfg *Config) (*Galacta, error) {
 	server := api.NewServer(handler, cfg.Port)
 
 	return &Galacta{
-		cfg:        cfg,
-		apiClient:  apiClient,
-		caller:     caller,
-		server:     server,
-		extClients: extClients,
+		cfg:       cfg,
+		apiClient: apiClient,
+		caller:    caller,
+		server:    server,
+		mcpMgr:    mcpMgr,
 	}, nil
 }
 
@@ -79,48 +77,7 @@ func (g *Galacta) Start() error {
 
 // Shutdown gracefully shuts down the Galacta daemon.
 func (g *Galacta) Shutdown() {
-	for _, mc := range g.extClients {
-		mc.Close()
+	if g.mcpMgr != nil {
+		g.mcpMgr.DisconnectAll()
 	}
-}
-
-// mcpConfigFile is the JSON format for external MCP server configuration.
-type mcpConfigFile struct {
-	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
-}
-
-type mcpServerEntry struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
-}
-
-func connectExternalMCP(configPath string) ([]client.MCPClient, error) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading MCP config: %w", err)
-	}
-
-	var config mcpConfigFile
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing MCP config: %w", err)
-	}
-
-	var clients []client.MCPClient
-	for name, entry := range config.MCPServers {
-		if entry.Type != "sse" {
-			log.Printf("galacta: skipping MCP server %q: unsupported type %q (only 'sse' supported)", name, entry.Type)
-			continue
-		}
-
-		mc, err := client.NewSSEMCPClient(entry.URL)
-		if err != nil {
-			log.Printf("galacta: failed to connect to MCP server %q at %s: %v", name, entry.URL, err)
-			continue
-		}
-
-		log.Printf("galacta: connected to MCP server %q at %s", name, entry.URL)
-		clients = append(clients, mc)
-	}
-
-	return clients, nil
 }

@@ -91,6 +91,7 @@ Flags for run:
   --tools              Tool allow list (repeatable)
   --allowedTools       Tool glob patterns (repeatable)
   --fallback-model     Fallback model on overload (529)
+  --mcp-config         Path to MCP servers config JSON
 
 Interactive commands (during session):
   /help          Show available commands
@@ -120,6 +121,7 @@ type runFlags struct {
 	tools         []string
 	allowedTools  []string
 	fallbackModel string
+	mcpConfigPath string
 }
 
 func parseRunFlags(args []string) runFlags {
@@ -188,6 +190,11 @@ func parseRunFlags(args []string) runFlags {
 			if i < len(args) {
 				f.fallbackModel = args[i]
 			}
+		case "--mcp-config":
+			i++
+			if i < len(args) {
+				f.mcpConfigPath = args[i]
+			}
 		default:
 			f.message = args[i]
 		}
@@ -217,6 +224,10 @@ func cmdRun(args []string) {
 	} else {
 		// Resuming — print old messages
 		printSessionHistory(flags.base, session)
+		// If --mcp-config was provided on resume, update the session's stored MCP servers.
+		if flags.mcpConfigPath != "" {
+			updateSessionMCP(flags.base, session, flags.mcpConfigPath)
+		}
 	}
 
 	// Fetch session info for banner
@@ -247,6 +258,7 @@ func cmdRun(args []string) {
 
 	// Enter interactive loop
 	interactiveLoop(flags.base, session, flags.outputFormat)
+	printResumeHint(session)
 }
 
 func createSession(flags runFlags) string {
@@ -275,6 +287,21 @@ func createSession(flags runFlags) string {
 	if len(flags.allowedTools) > 0 {
 		body["allowed_tools"] = flags.allowedTools
 	}
+	if flags.mcpConfigPath != "" {
+		data, err := os.ReadFile(flags.mcpConfigPath)
+		if err != nil {
+			fatal("reading MCP config: %v", err)
+		}
+		var cfg struct {
+			MCPServers map[string]any `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			fatal("parsing MCP config: %v", err)
+		}
+		if len(cfg.MCPServers) > 0 {
+			body["mcp_servers"] = cfg.MCPServers
+		}
+	}
 	resp, err := postJSON(flags.base+"/sessions", body)
 	if err != nil {
 		fatal("creating session: %v", err)
@@ -284,6 +311,28 @@ func createSession(flags runFlags) string {
 		fatal("unexpected response creating session")
 	}
 	return data["id"].(string)
+}
+
+func updateSessionMCP(base, session, mcpConfigPath string) {
+	data, err := os.ReadFile(mcpConfigPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%swarning: reading MCP config: %v%s\n", colorYellow, err, colorReset)
+		return
+	}
+	var cfg struct {
+		MCPServers map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "%swarning: parsing MCP config: %v%s\n", colorYellow, err, colorReset)
+		return
+	}
+	if len(cfg.MCPServers) == 0 {
+		return
+	}
+	body := map[string]any{"mcp_servers": cfg.MCPServers}
+	if _, err := patchJSON(base+"/sessions/"+session, body); err != nil {
+		fmt.Fprintf(os.Stderr, "%swarning: updating session MCP config: %v%s\n", colorYellow, err, colorReset)
+	}
 }
 
 func findMostRecentSession(base, workingDir string) string {
@@ -385,7 +434,12 @@ func cmdSessionCreate(args []string) {
 
 func cmdSessionList() {
 	base := galactaURL()
-	resp, err := getJSON(base + "/sessions")
+	cwd, _ := os.Getwd()
+	url := base + "/sessions"
+	if cwd != "" {
+		url += "?working_dir=" + cwd
+	}
+	resp, err := getJSON(url)
 	if err != nil {
 		fatal("listing sessions: %v", err)
 	}

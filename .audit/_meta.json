@@ -1,0 +1,16 @@
+{
+  "project_name": "galacta",
+  "audit_date": "2026-03-06",
+  "mode": "standard",
+  "focus_areas": ["security", "performance", "api", "architecture", "data-flow"],
+  "scopes_found": ["galacta-daemon", "jeff-cli", "benchmark-suite"],
+  "finding_counts": {
+    "critical": 2,
+    "high": 5,
+    "medium": 15,
+    "low": 8,
+    "info": 3
+  },
+  "risk_score": 5,
+  "verdict": "refactor"
+}

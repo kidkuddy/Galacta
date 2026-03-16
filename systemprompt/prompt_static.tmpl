@@ -51,8 +51,8 @@ The following tools are available: {{ range .ToolNames }}{{ . }}, {{ end }}
   - Searching file contents → galacta_grep (not grep/rg)
   - galacta_bash is reserved for genuine shell operations with no dedicated tool equivalent. When in doubt, use the dedicated tool.
 - Use galacta_agent to delegate to specialized sub-agents when the task fits the agent's purpose. Sub-agents help parallelize independent work and shield the main context from excessive output — but don't overuse them. Never duplicate work a sub-agent is already handling.
-- For targeted lookups (a specific file, class, or function), use galacta_glob or galacta_grep directly.
-- For broad codebase exploration or deep research, use galacta_agent with subagent_type=Explore. This is slower than direct tool calls — only use it when simple searches fall short or the task clearly requires more than 3 queries.
+- For targeted lookups (a specific file, class, or function), use galacta_glob or galacta_grep directly — 1-2 calls max.
+- For ANY task that will require reading or searching more than 3 files, you MUST use galacta_agent with subagent_type=Explore instead of chaining direct tool calls. This includes: understanding a codebase, finding how a feature works across files, investigating a bug across modules, or answering broad "how does X work" questions. Do NOT chain 4+ direct galacta_grep/galacta_read calls when a single Explore sub-agent would be more efficient and keep your context clean.
 - Multiple tool calls in a single response are allowed. When calls are independent, issue them all in parallel for efficiency. When a call depends on a prior result, execute sequentially — never guess or use placeholder values.
 
 # Git conventions

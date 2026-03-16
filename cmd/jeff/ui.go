@@ -197,9 +197,15 @@ func printBanner(model, dir, sessionID, mode string) {
 
 	info1 := fmt.Sprintf("  %s%s%s · %s", colorBold, model, colorReset, dir)
 	info2 := fmt.Sprintf("  %sSession: %s · Mode: %s%s", colorDim, sid, mode, colorReset)
+	info3 := fmt.Sprintf("  %sResume this session with:%s jeff --session %s", colorDim, colorReset, sessionID)
 
 	fmt.Fprintf(stderr, "%s\n", info1)
-	fmt.Fprintf(stderr, "%s\n\n", info2)
+	fmt.Fprintf(stderr, "%s\n", info2)
+	fmt.Fprintf(stderr, "%s\n\n", info3)
+}
+
+func printResumeHint(sessionID string) {
+	fmt.Fprintf(stderr, "\n  %sResume this session with:%s jeff --session %s\n\n", colorDim, colorReset, sessionID)
 }
 
 // Number formatters.

@@ -21,6 +21,7 @@ import (
 	"github.com/kidkuddy/galacta/events"
 	"github.com/kidkuddy/galacta/permissions"
 	"github.com/kidkuddy/galacta/systemprompt"
+	"github.com/kidkuddy/galacta/mcpmanager"
 	"github.com/kidkuddy/galacta/toolcaller"
 	"github.com/kidkuddy/galacta/team"
 	agenttools "github.com/kidkuddy/galacta/tools/agent"
@@ -59,6 +60,7 @@ type activeRun struct {
 	emitter      *events.Emitter
 	store        *db.SessionDB
 	questionGate *ask.QuestionGate
+	mcpMgr       *mcpmanager.Manager // per-session MCP servers (nil if none)
 }
 
 // MCPServerInfo is returned by the health endpoint.
@@ -99,17 +101,18 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 
 // CreateSessionRequest is the request body for creating a session.
 type CreateSessionRequest struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	WorkingDir     string   `json:"working_dir"`
-	Model          string   `json:"model"`
-	PermissionMode string   `json:"permission_mode"`
-	SystemPrompt   string   `json:"system_prompt"`
-	Effort         string   `json:"effort"`          // low, medium, high
-	MaxBudgetUSD   float64  `json:"max_budget_usd"`
-	FallbackModel  string   `json:"fallback_model"`
-	Tools          []string `json:"tools"`            // tool allow list
-	AllowedTools   []string `json:"allowed_tools"`    // glob patterns
+	ID             string                                `json:"id"`
+	Name           string                                `json:"name"`
+	WorkingDir     string                                `json:"working_dir"`
+	Model          string                                `json:"model"`
+	PermissionMode string                                `json:"permission_mode"`
+	SystemPrompt   string                                `json:"system_prompt"`
+	Effort         string                                `json:"effort"`          // low, medium, high
+	MaxBudgetUSD   float64                               `json:"max_budget_usd"`
+	FallbackModel  string                                `json:"fallback_model"`
+	Tools          []string                              `json:"tools"`            // tool allow list
+	AllowedTools   []string                              `json:"allowed_tools"`    // glob patterns
+	MCPServers     map[string]mcpmanager.MCPServerEntry  `json:"mcp_servers,omitempty"` // per-session MCP servers
 }
 
 // CreateSession creates a new session.
@@ -175,6 +178,10 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if len(req.AllowedTools) > 0 {
 		allowedJSON, _ := json.Marshal(req.AllowedTools)
 		store.SetMeta("allowed_tools", string(allowedJSON))
+	}
+	if len(req.MCPServers) > 0 {
+		mcpJSON, _ := json.Marshal(req.MCPServers)
+		store.SetMeta("mcp_servers", string(mcpJSON))
 	}
 	store.Close()
 
@@ -317,6 +324,7 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	fallbackModel, _ := store.GetMeta("fallback_model")
 	toolsStr, _ := store.GetMeta("tools")
 	allowedToolsStr, _ := store.GetMeta("allowed_tools")
+	mcpServersStr, _ := store.GetMeta("mcp_servers")
 
 	if model == "" {
 		model = h.defaultModel
@@ -351,6 +359,24 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 	questionGate := ask.NewQuestionGate(emitter)
 	planState := &plan.PlanState{}
 	sessionCaller, sessionClients := h.buildSessionCaller(workingDir, store, emitter, questionGate, planState)
+
+	// Connect per-session MCP servers (from session metadata)
+	var mcpMgr *mcpmanager.Manager
+	if mcpServersStr != "" {
+		var mcpEntries map[string]mcpmanager.MCPServerEntry
+		if err := json.Unmarshal([]byte(mcpServersStr), &mcpEntries); err == nil && len(mcpEntries) > 0 {
+			mcpMgr = mcpmanager.New()
+			connected, err := mcpMgr.ConnectFromEntries(ctx, mcpEntries)
+			if err != nil {
+				log.Printf("galacta: session %s: MCP connect error: %v", id, err)
+			}
+			for _, srv := range connected {
+				if err := sessionCaller.AddClient(ctx, srv.Client); err != nil {
+					log.Printf("galacta: session %s: failed to add MCP tools from %q: %v", id, srv.Name, err)
+				}
+			}
+		}
+	}
 
 	// Build tool filter from session metadata
 	var toolFilter *toolcaller.ToolFilter
@@ -395,6 +421,13 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 		// Fallback to user-provided prompt as a single block
 		if userSystemPrompt != "" {
 			builtPrompt = []anthropic.SystemBlock{anthropic.NewSystemBlock(userSystemPrompt)}
+		}
+	}
+
+	// Inject MCP server instructions into system prompt (dynamic, uncached)
+	if mcpMgr != nil {
+		if instr := mcpMgr.Instructions(); instr != "" {
+			builtPrompt = append(builtPrompt, anthropic.NewSystemBlock(instr))
 		}
 	}
 
@@ -450,6 +483,7 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 		emitter:      emitter,
 		store:        store,
 		questionGate: questionGate,
+		mcpMgr:       mcpMgr,
 	}
 
 	h.mu.Lock()
@@ -464,6 +498,9 @@ func (h *Handler) RunMessage(w http.ResponseWriter, r *http.Request) {
 			store.Close()
 			for _, mc := range sessionClients {
 				mc.Close()
+			}
+			if mcpMgr != nil {
+				mcpMgr.DisconnectAll()
 			}
 			h.mu.Lock()
 			delete(h.active, id)
@@ -732,8 +769,9 @@ func (h *Handler) buildSessionCaller(workingDir string, store *db.SessionDB, emi
 
 // UpdateSessionRequest is the request body for patching a session.
 type UpdateSessionRequest struct {
-	Model          string `json:"model,omitempty"`
-	PermissionMode string `json:"permission_mode,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	PermissionMode string         `json:"permission_mode,omitempty"`
+	MCPServers     map[string]any `json:"mcp_servers,omitempty"`
 }
 
 // UpdateSession patches session metadata (model, permission_mode).
@@ -770,6 +808,10 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		if running {
 			run.modeGate.SetMode(req.PermissionMode)
 		}
+	}
+	if len(req.MCPServers) > 0 {
+		mcpJSON, _ := json.Marshal(req.MCPServers)
+		store.SetMeta("mcp_servers", string(mcpJSON))
 	}
 
 	store.SetMeta("updated_at", time.Now().Format(time.RFC3339))
